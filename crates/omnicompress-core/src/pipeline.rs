@@ -55,6 +55,20 @@ impl CompressionPipeline {
     ///   replace block content with compressed+marker, record `CcrRef` + `Transform`.
     /// - If CCR write fails: keep original content (no data loss).
     pub fn compress(&self, messages: Vec<Block>, cfg: &CompressConfig) -> CompressResult {
+        self.compress_with(messages, cfg, |kind| self.pick(kind))
+    }
+
+    /// Internal workhorse that accepts an injectable `picker` closure.
+    ///
+    /// `compress` delegates here using the real `pick` implementation.
+    /// Tests may call this directly with a custom `picker` to inject
+    /// compressors that panic, fail, or behave in controlled ways.
+    pub(crate) fn compress_with(
+        &self,
+        messages: Vec<Block>,
+        cfg: &CompressConfig,
+        picker: impl Fn(ContentKind) -> Box<dyn Compressor>,
+    ) -> CompressResult {
         let total = messages.len();
         let policy = ProtectionPolicy::new(cfg);
 
@@ -74,7 +88,7 @@ impl CompressionPipeline {
             }
 
             let kind = self.router.route(&block.content);
-            let comp = self.pick(kind);
+            let comp = picker(kind);
             let comp_name = comp.name();
 
             // Fail-open: if the compressor panics, treat as untouched.
@@ -198,6 +212,51 @@ mod tests {
         let r = pipe.compress(msgs, &CompressConfig::default());
         // Nothing should have been put into CCR
         assert_eq!(r.ccr_refs.len(), 0, "recent blocks must not compress");
+    }
+
+    /// A compressor that always panics — used to verify the fail-open path.
+    #[cfg(test)]
+    struct PanickingCompressor;
+
+    #[cfg(test)]
+    impl Compressor for PanickingCompressor {
+        fn name(&self) -> &'static str { "panicking" }
+        fn compress(&self, _content: &str) -> Outcome {
+            panic!("intentional panic in PanickingCompressor");
+        }
+    }
+
+    /// Verifies that a panicking compressor results in the block being returned
+    /// unchanged (fail-open) and no CCR refs being recorded.
+    #[test]
+    fn panicking_compressor_is_fail_open() {
+        let store = Arc::new(MemoryStore::default());
+        let pipe = CompressionPipeline::new_arc(store.clone());
+
+        // Build content large enough to escape the min_chars protection threshold
+        // and old enough (position 0 with 6 trailing blocks) to exit the recent window.
+        let content = "x".repeat(700);
+        let mut msgs = vec![Block::from_text(Role::User, &content)];
+        for i in 0..6 {
+            msgs.push(Block::from_text(Role::Assistant, &format!("ok {i}")));
+        }
+        let original_content = msgs[0].content.clone();
+
+        let r = pipe.compress_with(msgs, &CompressConfig::default(), |_kind| {
+            Box::new(PanickingCompressor)
+        });
+
+        // The first block must be returned unchanged.
+        assert_eq!(
+            r.messages[0].content, original_content,
+            "panicking compressor must not modify block content"
+        );
+        // No CCR refs must have been recorded (fail-open = no store write).
+        assert_eq!(
+            r.ccr_refs.len(),
+            0,
+            "panicking compressor must not produce CCR refs"
+        );
     }
 
     #[test]
