@@ -1,3 +1,11 @@
+//! AST-based code compressor for SP1.
+//!
+//! **SP1 supports Python only.** Content classified as `ContentKind::Code`
+//! that is not valid Python (e.g. JavaScript, TypeScript, Rust, etc.) will
+//! fail the `tree-sitter-python` parse step and fall through to
+//! `Outcome::untouched` — fail-open, no panic, no data loss. Support for
+//! additional languages is deferred to SP2+.
+
 use super::{Compressor, Outcome};
 use tree_sitter::{Node, Parser};
 
@@ -86,5 +94,23 @@ mod tests {
         assert!(out.compressed.contains("def alpha(x)"), "mantém assinatura");
         assert!(out.compressed.contains("import os"), "mantém imports");
         assert!(out.compressed.len() < code.len());
+    }
+
+    /// JavaScript content routed to CodeCompressor must fall through to
+    /// `Outcome::untouched` (SP1 supports Python only). No panic must occur.
+    #[test]
+    fn javascript_falls_through_to_untouched() {
+        // Build JS content long enough to exceed the min-size guard (400 chars).
+        let js = "function processData(items) { return items.map(x => x * 2); }\n"
+            .repeat(10);
+        assert!(js.len() >= 400, "test precondition: content must exceed size guard");
+
+        let out = CodeCompressor::default().compress(&js);
+
+        // SP1 Python-only: non-Python code must return original=None (untouched).
+        assert!(
+            out.original.is_none(),
+            "JavaScript must not be stored in CCR (original must be None); got original=Some(_)"
+        );
     }
 }
