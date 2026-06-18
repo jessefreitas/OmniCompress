@@ -3,7 +3,7 @@
 /// Every store implementation must pass `roundtrip`. Add one test function
 /// per concrete store that calls `roundtrip` with an instance of that store.
 
-use omnicompress_core::ccr::{hash_of, CCRStore, MemoryStore};
+use omnicompress_core::ccr::{hash_of, CCRStore, EmbeddedStore, MemoryStore};
 
 // ── contract ───────────────────────────────────────────────────────────────
 
@@ -41,4 +41,14 @@ fn roundtrip<S: CCRStore>(store: S) {
 #[test]
 fn memory_store_satisfies_contract() {
     roundtrip(MemoryStore::default());
+}
+
+#[test]
+fn embedded_store_satisfies_contract() {
+    let mut path = std::env::temp_dir();
+    path.push("omnicompress_contract_embedded.redb");
+    // Remove any leftover from a previous run so each test starts clean.
+    let _ = std::fs::remove_file(&path);
+    let store = EmbeddedStore::open(&path).expect("EmbeddedStore::open must succeed");
+    roundtrip(store);
 }
