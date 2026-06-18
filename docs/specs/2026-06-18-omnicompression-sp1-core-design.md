@@ -98,14 +98,15 @@ reverso (sob demanda do LLM): retrieve(hash) → CCRStore.get(hash) → original
 ## Contrato de reversibilidade (CCR)
 
 - Todo bloco comprimido com perda carrega um **hash estável**; `get(hash)` devolve o original
-  **byte-idêntico** enquanto dentro do TTL.
-- **Durabilidade (princípio de design):** cache de CCR puramente em RAM com TTL converte
-  silenciosamente "lossless com retrieval" em "lossy" ao expirar — é o elo fraco da garantia de
-  "sem perda de acurácia". Por isso o default `EmbeddedStore` (`redb`) é **on-disk durável**
-  (sobrevive restart), capacidade = disco, e **expiração nunca vira perda silenciosa**: ao
-  expirar/evictar, o marcador de retrieve é reescrito como "original descartado (expirado)" —
-  explícito, auditável, nunca lossy-silencioso.
-- TTL e tamanho máximo são configuráveis; default conservador (ex: 24h on-disk).
+  **byte-idêntico** enquanto o payload permanecer no store.
+- **Durabilidade (SP1):** o `EmbeddedStore` (`redb`) é **on-disk durável e não-evicting** em SP1:
+  payloads persistem pelo tempo de vida do arquivo de banco de dados. Nenhuma conversão silenciosa
+  de "lossless com retrieval" em "lossy" pode ocorrer em SP1.
+- **TTL / expiração e "honest marker" — deferido (SP2+):** a reescrita do marcador em contexto
+  como "original descartado (expirado)" ao evictar/expirar requer a **superfície de retrieval**
+  (o componente que serve `get` de volta ao LLM), definida em SP2. Em SP1, nenhum TTL é aplicado
+  e nenhuma evicção silenciosa ocorre. Esta feature é **explicitamente fora do escopo de SP1**
+  e será implementada em SP2+.
 
 ---
 
@@ -149,7 +150,7 @@ de compressão; nunca perde conteúdo.
 - **Unit por compressor:** ratio mínimo por tipo + **reconstrução** (round-trip via CCR) byte-idêntica.
 - **Router:** tabela de classificação (json/code/log/prose/diff/unknown) com fixtures reais.
 - **ProtectionPolicy:** recentes-N e conteúdo crítico nunca comprimidos.
-- **CCRStore:** round-trip, TTL/expiração → marcador honesto (não lossy-silencioso), os 3 backends contra o mesmo conjunto de testes de contrato.
+- **CCRStore:** round-trip + durabilidade (non-evicting em SP1), os 3 backends contra o mesmo conjunto de testes de contrato. TTL/expiração → marcador honesto é **deferido (SP2+)** (requer superfície de retrieval).
 - **Pipeline:** integração end-to-end numa sessão misturada.
 - **Fail-open:** compressor que lança → bloco volta intacto, métrica incrementada.
 - **Cross-platform:** suíte roda na matriz CI (3 SOs).

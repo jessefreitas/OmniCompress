@@ -37,6 +37,21 @@ pub fn hash_of(bytes: &[u8]) -> Hash {
 ///    byte-identical payload.
 /// 3. `get` on a key that was never stored returns `Ok(None)`.
 /// 4. Both operations are thread-safe (implementations use interior mutability).
+///
+/// # TTL / expiry — DEFERRED to SP2+
+///
+/// The SP1 `EmbeddedStore` is **durable and non-evicting**: stored payloads
+/// persist for the lifetime of the on-disk database file and are never silently
+/// discarded. Because of this, no silent-lossy conversion of "lossless with
+/// retrieval" into "lossy" can occur in SP1.
+///
+/// The behaviour described in the SP1 spec as "upon expiry/eviction, rewrite
+/// the in-context marker as 'original discarded (expired)' — explicit,
+/// auditable, never lossy-silent" **requires the retrieval surface** (the
+/// component that serves `get` requests back to the LLM). That surface is
+/// defined in SP2. Consequently, TTL enforcement and the "expired → honest
+/// marker" rewrite are **deferred to SP2+** and are explicitly out of scope
+/// for this crate.
 pub trait CCRStore: Send + Sync {
     /// Store `bytes` and return the content-address hash.
     ///
