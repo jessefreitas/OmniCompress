@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/omnicompress-core", "crates/omnicompress-py"]
+members = ["crates/omnicompress-core", "crates/omnicompress-cli", "crates/omnicompress-py"]
 
 [workspace.package]
 version = "0.1.0"
