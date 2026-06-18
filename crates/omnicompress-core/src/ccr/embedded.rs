@@ -5,7 +5,6 @@
 
 use std::io;
 use std::path::Path;
-use std::sync::Mutex;
 
 use redb::{Database, TableDefinition};
 
@@ -19,16 +18,17 @@ const BLOCKS: TableDefinition<&str, &[u8]> = TableDefinition::new("blocks");
 /// A content-addressed store backed by a redb database file.
 ///
 /// The database is opened (or created) at construction time with
-/// [`EmbeddedStore::open`]. A `Mutex` serialises writes; reads use
-/// redb's built-in MVCC and are fully concurrent in production use,
-/// but are serialised here through the same mutex for simplicity.
+/// [`EmbeddedStore::open`]. redb's `Database` is `Send + Sync` and implements
+/// MVCC internally: concurrent reads run without blocking each other, and
+/// writes are serialised by redb's own write-transaction lock — no additional
+/// `Mutex` is required here.
 ///
 /// # Durability
 ///
 /// Every `put` call opens a write transaction and commits it before
 /// returning, so data survives process crashes.
 pub struct EmbeddedStore {
-    db: Mutex<Database>,
+    db: Database,
 }
 
 impl EmbeddedStore {
@@ -36,21 +36,16 @@ impl EmbeddedStore {
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let db = Database::create(path.as_ref())
             .map_err(|e| io::Error::other(e.to_string()))?;
-        Ok(EmbeddedStore {
-            db: Mutex::new(db),
-        })
+        Ok(EmbeddedStore { db })
     }
 }
 
 impl CCRStore for EmbeddedStore {
     fn put(&self, bytes: &[u8]) -> io::Result<Hash> {
         let hash = hash_of(bytes);
-        let db = self
-            .db
-            .lock()
-            .map_err(|_| io::Error::other("lock poisoned"))?;
 
-        let write_txn = db
+        let write_txn = self
+            .db
             .begin_write()
             .map_err(|e| io::Error::other(e.to_string()))?;
         {
@@ -69,12 +64,8 @@ impl CCRStore for EmbeddedStore {
     }
 
     fn get(&self, hash: &str) -> io::Result<Option<Vec<u8>>> {
-        let db = self
+        let read_txn = self
             .db
-            .lock()
-            .map_err(|_| io::Error::other("lock poisoned"))?;
-
-        let read_txn = db
             .begin_read()
             .map_err(|e| io::Error::other(e.to_string()))?;
 
