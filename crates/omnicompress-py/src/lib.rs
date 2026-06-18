@@ -1,3 +1,6 @@
+// The `useless_conversion` lint fires inside `#[pyfunction]` macro-generated code, not ours.
+#![allow(clippy::useless_conversion)]
+
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::sync::Arc;
@@ -29,8 +32,6 @@ fn role_from(s: &str) -> Role {
 ///   - "tokens_saved":  int
 ///   - "messages": list[dict{"content": str}]
 ///   - "ccr_refs": list[dict{"hash": str}]
-// The `useless_conversion` lint fires on `#[pyfunction]` macro-generated code, not ours.
-#[allow(clippy::useless_conversion)]
 #[pyfunction]
 fn compress(py: Python<'_>, messages: Vec<Bound<'_, PyDict>>) -> PyResult<Py<PyDict>> {
     let mut blocks: Vec<Block> = Vec::with_capacity(messages.len());
