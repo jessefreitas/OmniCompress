@@ -22,8 +22,8 @@ impl CompressionPipeline {
     /// Primary constructor: share ownership of the CCR store via `Arc`.
     pub fn new_arc(ccr: Arc<dyn CCRStore>) -> Self {
         Self {
-            router: ContentRouter::default(),
-            tok: HeuristicTokenizer::default(),
+            router: ContentRouter,
+            tok: HeuristicTokenizer,
             ccr,
         }
     }
@@ -37,10 +37,10 @@ impl CompressionPipeline {
     /// Select the appropriate compressor for a classified content kind.
     fn pick(&self, kind: ContentKind) -> Box<dyn Compressor> {
         match kind {
-            ContentKind::Json => Box::new(JsonCrusher::default()),
-            ContentKind::Code => Box::new(CodeCompressor::default()),
+            ContentKind::Json => Box::new(JsonCrusher),
+            ContentKind::Code => Box::new(CodeCompressor),
             ContentKind::Log | ContentKind::Prose | ContentKind::Diff => {
-                Box::new(LogTextCompressor::default())
+                Box::new(LogTextCompressor)
             }
             ContentKind::Unknown => Box::new(PassThrough),
         }
