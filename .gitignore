@@ -1,0 +1,40 @@
+# Rust
+/target/
+**/target/
+*.rs.bk
+*.pdb
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# maturin / wheels
+wheels/
+*.whl
+
+# CCR embedded store (redb) / local data
+*.redb
+/data/
+*.sqlite
+*.db
+
+# env / secrets — NUNCA commitar
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
