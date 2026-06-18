@@ -23,11 +23,16 @@ enum Cmd {
     },
     /// Evaluate compression quality over a directory of JSON sample files.
     ///
-    /// Each `*.json` file in `<dir>` must contain a JSON array of Block objects
-    /// (`[{"role": ..., "content": ..., "tool_name": ...}, ...]`).
+    /// Each `*.json` file in `<dir>` must contain a JSON array of message objects
+    /// with lowercase role names: `[{"role": "user"|"assistant"|"system"|"tool",
+    /// "content": "...", "tool_name": "..." | null}, ...]`.
+    ///
+    /// Files that cannot be read or parsed appear in `errors[]` and are counted
+    /// in `aggregate.errored` — they are never silently dropped.
+    ///
     /// Prints a per-file + aggregate summary in JSON.
     Eval {
-        /// Directory containing sample `*.json` files (each a `Vec<Block>`).
+        /// Directory containing sample `*.json` files.
         dir: String,
     },
 }
@@ -62,6 +67,30 @@ fn run_compress(file: &str) {
     );
 }
 
+/// Lenient input representation for a message in a session JSON file.
+///
+/// Real session files (and the Python binding) use lowercase roles:
+/// "user", "assistant", "system", "tool". This struct accepts any string for
+/// `role` and maps it to the canonical `Role` enum via `role_from_str`.
+#[derive(serde::Deserialize)]
+struct MsgIn {
+    role: String,
+    content: String,
+    #[serde(default)]
+    tool_name: Option<String>,
+}
+
+/// Map a lowercase role string to the canonical `Role` enum.
+/// Unknown roles fall back to `User` (same convention as the Python binding).
+fn role_from_str(s: &str) -> Role {
+    match s {
+        "system" => Role::System,
+        "assistant" => Role::Assistant,
+        "tool" => Role::Tool,
+        _ => Role::User,
+    }
+}
+
 fn run_eval(dir: &str) {
     let read_dir = std::fs::read_dir(dir).unwrap_or_else(|e| {
         eprintln!("error reading directory {dir}: {e}");
@@ -75,32 +104,72 @@ fn run_eval(dir: &str) {
     files.sort();
 
     if files.is_empty() {
-        println!("{{\"files\":[],\"aggregate\":{{\"tokens_before\":0,\"tokens_after\":0,\"ratio\":null,\"roundtrip_ok\":true}}}}");
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "files": [],
+                "errors": [],
+                "aggregate": {
+                    "tokens_before": 0,
+                    "tokens_after": 0,
+                    "ratio": null,
+                    "roundtrip_ok": true,
+                    "processed": 0,
+                    "errored": 0,
+                }
+            }))
+            .unwrap()
+        );
         return;
     }
 
     let cfg = CompressConfig::default();
     let mut file_reports: Vec<serde_json::Value> = Vec::new();
+    let mut error_reports: Vec<serde_json::Value> = Vec::new();
     let mut total_before: usize = 0;
     let mut total_after: usize = 0;
     let mut all_roundtrip_ok = true;
 
     for path in &files {
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?")
+            .to_string();
+
+        // Attempt to read the file.
         let raw = match std::fs::read_to_string(path) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("warning: skipping {}: {e}", path.display());
+                error_reports.push(serde_json::json!({
+                    "file": file_name,
+                    "reason": format!("read error: {e}"),
+                }));
                 continue;
             }
         };
 
-        let msgs: Vec<Block> = match serde_json::from_str(&raw) {
+        // Parse as Vec<MsgIn> using lowercase role names (real-world convention).
+        let msg_ins: Vec<MsgIn> = match serde_json::from_str(&raw) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("warning: skipping {} (parse error): {e}", path.display());
+                error_reports.push(serde_json::json!({
+                    "file": file_name,
+                    "reason": format!("parse error: {e}"),
+                }));
                 continue;
             }
         };
+
+        // Map MsgIn → Block.
+        let msgs: Vec<Block> = msg_ins
+            .into_iter()
+            .map(|m| Block {
+                role: role_from_str(&m.role),
+                content: m.content,
+                tool_name: m.tool_name,
+            })
+            .collect();
 
         let store = Arc::new(MemoryStore::default());
         let pipe = CompressionPipeline::new_arc(store.clone());
@@ -113,13 +182,16 @@ fn run_eval(dir: &str) {
         }
 
         file_reports.push(serde_json::json!({
-            "file": path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+            "file": file_name,
             "tokens_before": report.tokens_before,
             "tokens_after": report.tokens_after,
             "ratio": report.ratio,
             "roundtrip_ok": report.roundtrip_ok,
         }));
     }
+
+    let processed = file_reports.len();
+    let errored = error_reports.len();
 
     let agg_ratio: serde_json::Value = if total_before == 0 {
         serde_json::Value::Null
@@ -129,11 +201,14 @@ fn run_eval(dir: &str) {
 
     let summary = serde_json::json!({
         "files": file_reports,
+        "errors": error_reports,
         "aggregate": {
             "tokens_before": total_before,
             "tokens_after": total_after,
             "ratio": agg_ratio,
             "roundtrip_ok": all_roundtrip_ok,
+            "processed": processed,
+            "errored": errored,
         }
     });
 
