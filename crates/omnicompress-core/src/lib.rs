@@ -5,3 +5,4 @@ pub mod compressor;
 pub mod ccr;
 pub mod protection;
 pub mod pipeline;
+pub mod eval;
