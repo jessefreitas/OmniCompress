@@ -26,7 +26,7 @@ impl CCRStore for MemoryStore {
         let mut map = self
             .inner
             .write()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "lock poisoned"))?;
+            .map_err(|_| io::Error::other("lock poisoned"))?;
         map.entry(hash.clone()).or_insert_with(|| bytes.to_vec());
         Ok(hash)
     }
@@ -35,7 +35,7 @@ impl CCRStore for MemoryStore {
         let map = self
             .inner
             .read()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "lock poisoned"))?;
+            .map_err(|_| io::Error::other("lock poisoned"))?;
         Ok(map.get(hash).cloned())
     }
 }

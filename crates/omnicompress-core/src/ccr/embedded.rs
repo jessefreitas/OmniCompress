@@ -35,7 +35,7 @@ impl EmbeddedStore {
     /// Open (or create) a redb database at `path`.
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let db = Database::create(path.as_ref())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
         Ok(EmbeddedStore {
             db: Mutex::new(db),
         })
@@ -48,22 +48,22 @@ impl CCRStore for EmbeddedStore {
         let db = self
             .db
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "lock poisoned"))?;
+            .map_err(|_| io::Error::other("lock poisoned"))?;
 
         let write_txn = db
             .begin_write()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
         {
             let mut table = write_txn
                 .open_table(BLOCKS)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                .map_err(|e| io::Error::other(e.to_string()))?;
             table
                 .insert(hash.as_str(), bytes)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                .map_err(|e| io::Error::other(e.to_string()))?;
         }
         write_txn
             .commit()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
 
         Ok(hash)
     }
@@ -72,22 +72,22 @@ impl CCRStore for EmbeddedStore {
         let db = self
             .db
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "lock poisoned"))?;
+            .map_err(|_| io::Error::other("lock poisoned"))?;
 
         let read_txn = db
             .begin_read()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
 
         // The table may not exist yet (freshly created db with no puts).
         let table = match read_txn.open_table(BLOCKS) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
-            Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
+            Err(e) => return Err(io::Error::other(e.to_string())),
         };
 
         let result = table
             .get(hash)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
 
         Ok(result.map(|ag| ag.value().to_vec()))
     }
