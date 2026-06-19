@@ -314,4 +314,30 @@ mod tests {
         let out = compress_anthropic_request(&body);
         assert!(out.len() < body.len(), "nested tool_result text must compress");
     }
+
+    #[test]
+    fn anthropic_cache_control_is_preserved() {
+        // A block can carry `cache_control` (Anthropic's explicit prompt-cache
+        // breakpoint). We only ever rewrite the `text`/`content` value, so sibling
+        // fields survive — and under cache_stable the compressed bytes are stable
+        // across turns, so the breakpoint still caches (on the smaller payload).
+        let req = serde_json::json!({
+            "model": "claude-3",
+            "messages": [{ "role": "user", "content": [
+                { "type": "text", "text": compressible_json(60),
+                  "cache_control": { "type": "ephemeral" } }
+            ]}]
+        });
+        let body = serde_json::to_vec(&req).unwrap();
+        let out = compress_anthropic_request(&body);
+        assert!(out.len() < body.len(), "marked block text should still compress");
+
+        let parsed: Value = serde_json::from_slice(&out).unwrap();
+        let block = &parsed["messages"][0]["content"][0];
+        assert_eq!(block["type"], "text");
+        assert_eq!(
+            block["cache_control"]["type"], "ephemeral",
+            "cache_control must survive compression"
+        );
+    }
 }
