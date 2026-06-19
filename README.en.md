@@ -34,12 +34,12 @@ your agent  →  [ OmniCompress compresses here ]  →  LLM (Anthropic · OpenAI
 
 | Principle | What it means |
 |---|---|
-| 🟢 **Lossless by default** | in the default mode nothing is dropped — the compressed form holds all the data (an array becomes a columnar table). **The model answers from what it sees, no retrieve required.** |
-| ⚡ **Deterministic** | algorithmic compression (statistics + AST), **no model in the hot path**. Zero inference cost, milliseconds. |
-| 🧠 **Cache-aware** | byte-stable prefix across turns — it **doesn't invalidate the provider's prompt cache** (proven by test). |
-| 🔁 **Aggressive + CCR (opt-in)** | for maximum compression, sample/elide and store the original in the Compress-Cache-Retrieve store (back by hash). **Requires a retrieve loop** — use only where the agent can call an expand tool. |
-| 🔌 **Multi-surface** | library, drop-in HTTP proxy, MCP server, and CLI — plugs into any workflow. |
-| 🛡️ **Fail-open** | a compression error never fails the request or loses content — it passes through intact. |
+| 🟢 **Lossless by default** | In the default mode **nothing is dropped**: an array of objects becomes a **columnar table** (the schema is factored out once + every row follows as a value-tuple), and identical log lines collapse with a count. The compressed form carries **100% of the data** — the model answers from what it sees, with **no retrieve round-trip**. It's the safe default for any consumer, including a passive proxy. |
+| ⚡ **Deterministic** | Compression is **pure algorithm** — statistics + AST (tree-sitter), **not an ML model in the hot path**. Same input → same output, in **milliseconds** and at **zero inference cost**: you don't pay tokens to save tokens, nor add the latency of a second call. |
+| 🧠 **Cache-aware** | The compressed prefix is **byte-stable across turns** (proven by test): a block's compressed form doesn't change as the window slides. So the **provider's prompt cache isn't invalidated** — you don't lose, by re-processing, what you saved by compressing. |
+| 🔁 **Aggressive + CCR (opt-in)** | For maximum compression, sample arrays and elide code/prose/objects, storing the original in the **CCR** (Compress-Cache-Retrieve), recoverable by hash. Much higher ratio, but it **requires a retrieve loop** (e.g. the MCP expand tool) — without one, queries needing the elided detail fail. That's why it is **not** the default. |
+| 🔌 **Multi-surface** | The same engine runs as a **library** (Python via PyO3), a **drop-in HTTP proxy** (speaks OpenAI *and* Anthropic, no code changes), an **MCP server** (`compress`/`retrieve`/`stats` tools), and a **CLI** — plugs into any agent workflow. |
+| 🛡️ **Fail-open** | If a compressor errors — or even panics — the original block **passes through intact**: the request never breaks and no data is lost. Production robustness over compression ratio. |
 
 ## Two modes (an honest choice)
 

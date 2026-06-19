@@ -34,12 +34,12 @@ seu agente  →  [ OmniCompress comprime aqui ]  →  LLM (Anthropic · OpenAI �
 
 | Princípio | O que significa |
 |---|---|
-| 🟢 **Lossless por padrão** | no modo default, nada é descartado — o conteúdo comprimido contém todos os dados (array vira tabela colunar). **O modelo responde só com o que vê, sem precisar de retrieve.** |
-| ⚡ **Determinístico** | compressão por algoritmo (estatística + AST), **sem modelo no caminho quente**. Zero custo de inferência, milissegundos. |
-| 🧠 **Cache-aware** | prefixo byte-estável entre turnos — **não invalida o cache de prompt** do provedor (provado por teste). |
-| 🔁 **Modo agressivo + CCR (opt-in)** | pra compressão máxima, elide/amostra e guarda o original no Compress-Cache-Retrieve (volta por hash). **Exige um loop de retrieve** — use só onde o agente pode chamar a tool de expandir. |
-| 🔌 **Multi-superfície** | biblioteca, proxy HTTP drop-in, servidor MCP e CLI — pluga em qualquer fluxo. |
-| 🛡️ **Fail-open** | erro de compressão nunca falha a request nem perde conteúdo — passa intacto. |
+| 🟢 **Lossless por padrão** | No modo default **nada é descartado**: uma array de objetos vira uma **tabela colunar** (o schema é fatorado uma vez + todas as linhas seguem como tuplas de valores), e linhas de log idênticas são colapsadas com contagem. O conteúdo comprimido carrega **100% dos dados** — o modelo responde só com o que vê, **sem nenhum round-trip de retrieve**. É o default seguro pra qualquer consumidor, inclusive um proxy passivo. |
+| ⚡ **Determinístico** | A compressão é **algoritmo puro** — estatística + AST (tree-sitter), **não um modelo de ML no caminho quente**. Mesma entrada → mesma saída, em **milissegundos** e com **custo zero de inferência**: você não paga token pra economizar token, nem adiciona a latência de uma segunda chamada. |
+| 🧠 **Cache-aware** | O prefixo comprimido é **byte-estável entre turnos** (provado por teste): a forma comprimida de um bloco não muda conforme a janela desliza. Assim o **cache de prompt do provedor não é invalidado** — você não perde, re-processando, o que economizou comprimindo. |
+| 🔁 **Modo agressivo + CCR (opt-in)** | Pra compressão máxima, amostra arrays e elide código/prosa/objetos, guardando o original no **CCR** (Compress-Cache-Retrieve), recuperável por hash. Rende muito mais, mas **exige um loop de retrieve** (ex.: a tool MCP de expandir) — sem ele, queries que precisam do detalhe elidido falham. Por isso **não** é o default. |
+| 🔌 **Multi-superfície** | A mesma engine roda como **biblioteca** (Python via PyO3), **proxy HTTP drop-in** (fala OpenAI *e* Anthropic, sem mudar seu código), **servidor MCP** (tools `compress`/`retrieve`/`stats`) e **CLI** — pluga em qualquer fluxo de agente. |
+| 🛡️ **Fail-open** | Se um compressor falhar — ou até entrar em pânico — o bloco original **passa intacto**: a request nunca quebra e nenhum dado se perde. Robustez em produção acima de taxa de compressão. |
 
 ## Dois modos (escolha honesta)
 
