@@ -29,10 +29,20 @@ class OpenAICompatProvider(ChatProvider):
         self.api_key = api_key
         self.timeout = timeout
 
+    @staticmethod
+    def _sanitize(messages: list[dict]) -> list[dict]:
+        """Coerce roles to the chat-API trio; bare `tool` roles cause 400s."""
+        ok = {"system", "user", "assistant"}
+        return [
+            {"role": m.get("role") if m.get("role") in ok else "user",
+             "content": m.get("content", "")}
+            for m in messages
+        ]
+
     def answer(self, messages: list[dict], question: str) -> str:
         payload = {
             "model": self.model,
-            "messages": messages + [{"role": "user", "content": question}],
+            "messages": self._sanitize(messages) + [{"role": "user", "content": question}],
             "temperature": 0,
         }
         data = json.dumps(payload).encode("utf-8")
