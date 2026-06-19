@@ -1,0 +1,9 @@
+[package]
+name = "omnicompress-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+omnicompress-core = { path = "../omnicompress-core" }
+serde_json = "1"
