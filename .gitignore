@@ -7,6 +7,9 @@ docs/
 *.rs.bk
 *.pdb
 
+# Local cargo config (machine-specific target-dir on SSD) — not committed.
+.cargo/
+
 # Python
 __pycache__/
 *.py[cod]
