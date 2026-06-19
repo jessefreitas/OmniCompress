@@ -51,6 +51,9 @@ impl CompressionPipeline {
     fn pick(&self, kind: ContentKind, cfg: &CompressConfig) -> Box<dyn Compressor> {
         match kind {
             ContentKind::Json => Box::new(JsonCrusher { lossless: cfg.lossless }),
+            ContentKind::Tabular => Box::new(
+                crate::compressor::tabular::TabularCompressor { lossless: cfg.lossless },
+            ),
             ContentKind::Code => Box::new(CodeCompressor { lossless: cfg.lossless }),
             ContentKind::Prose => {
                 Box::new(crate::compressor::prose::ProseCompressor { lossless: cfg.lossless })
@@ -352,5 +355,83 @@ mod tests {
             render(10),
             "old block must be byte-identical so the prefix cache holds"
         );
+    }
+
+    /// Render the content of every message after compressing `msgs` with `cfg`.
+    fn render_prefix(msgs: Vec<Block>, cfg: &CompressConfig) -> Vec<String> {
+        let store = Arc::new(MemoryStore::default());
+        let pipe = CompressionPipeline::new_arc(store);
+        pipe.compress(msgs, cfg)
+            .messages
+            .into_iter()
+            .map(|b| b.content)
+            .collect()
+    }
+
+    /// Build a conversation whose compressible block sits exactly on the recency
+    /// boundary: at index 1 of a 5-message turn it is inside `protect_recent` (4),
+    /// but appending one more turn pushes it out of the window.
+    fn conversation_with_boundary_block() -> Vec<Block> {
+        let mut msgs = vec![Block::from_text(Role::Assistant, "intro")];
+        msgs.push(Block::tool(Role::User, &big_json(), "search")); // index 1
+        for i in 0..3 {
+            msgs.push(Block::from_text(Role::Assistant, &format!("turn {i}")));
+        }
+        msgs // total = 5; protect_recent=4 ⇒ index 1 is protected (1+4>=5)
+    }
+
+    /// End-to-end cache stability: with `cache_stable`, appending a new turn must
+    /// NOT change the bytes of any pre-existing message — the whole prefix is
+    /// byte-identical, so the provider's prompt cache keeps hitting. This is the
+    /// property the README's "byte-estável entre turnos" actually depends on.
+    #[test]
+    fn cache_stable_prefix_is_byte_identical_across_an_appended_turn() {
+        let cfg = CompressConfig { cache_stable: true, ..CompressConfig::default() };
+
+        let base = conversation_with_boundary_block();
+        let before = render_prefix(base.clone(), &cfg);
+
+        let mut grown = base;
+        grown.push(Block::from_text(Role::User, "a brand new turn"));
+        let after = render_prefix(grown, &cfg);
+
+        // Every pre-existing message renders identically before and after append.
+        assert_eq!(
+            before,
+            after[..before.len()].to_vec(),
+            "cache_stable: appending a turn must not rewrite any earlier message"
+        );
+        // The boundary block (index 1) was actually compressed in both renders.
+        assert!(
+            before[1].contains("json_table"),
+            "boundary block should be compressed under cache_stable, got: {}",
+            before[1]
+        );
+    }
+
+    /// The honest counterpart: in the DEFAULT config (`cache_stable=false`) the
+    /// prefix is NOT stable. A block on the recency boundary flips from
+    /// untouched → compressed when a turn is appended, changing its bytes and
+    /// busting the provider's prefix cache. Documents exactly why the proxy opts
+    /// into cache_stable.
+    #[test]
+    fn default_prefix_is_not_stable_at_the_recency_boundary() {
+        let cfg = CompressConfig::default(); // cache_stable = false
+
+        let base = conversation_with_boundary_block();
+        let before = render_prefix(base.clone(), &cfg);
+
+        let mut grown = base;
+        grown.push(Block::from_text(Role::User, "a brand new turn"));
+        let after = render_prefix(grown, &cfg);
+
+        // Index 1 was protected by recency before the append (passed through),
+        // and compressed after it — so its bytes change: the cache is busted.
+        assert_eq!(before[1], big_json(), "still protected before append");
+        assert_ne!(
+            before[1], after[1],
+            "default mode: boundary block must change bytes once it leaves the recent window"
+        );
+        assert!(after[1].contains("json_table"), "now compressed: {}", after[1]);
     }
 }

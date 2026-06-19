@@ -11,7 +11,9 @@ def test_session_compress_retrieve_roundtrip():
     msgs = [{"role": "user", "content": big}]
     msgs += [{"role": "assistant", "content": f"ok {i}"} for i in range(6)]
 
-    res = sess.compress(msgs)
+    # Aggressive mode stores the original in the session's CCR (the default
+    # lossless mode keeps everything in the visible columnar table instead).
+    res = sess.compress(msgs, lossless=False)
     assert res["tokens_after"] < res["tokens_before"]
     assert len(res["ccr_refs"]) >= 1
 

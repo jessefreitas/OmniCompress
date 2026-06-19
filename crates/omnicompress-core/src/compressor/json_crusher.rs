@@ -49,15 +49,33 @@ fn elide(v: &Value, limit: usize) -> Value {
 }
 
 /// Lossless columnar form of an array of objects: a single shared schema (the
-/// ordered union of all keys) plus one value-row per item (`null` for absent
-/// keys). Every value is preserved — reconstructable, no CCR needed. Returns
-/// `None` if any item is not an object (columnar does not apply).
+/// ordered union of all keys) plus one row per item. Every value is preserved
+/// and the encoding is fully reversible via [`restore_table`] — reconstructable,
+/// no CCR needed. Returns `None` if any item is not an object (columnar does not
+/// apply).
+///
+/// ## Absent vs. `null`
+/// A key that is *missing* from an object is distinguished from a key whose value
+/// is explicitly `null`, so `{}` and `{"a":null}` never collapse together:
+/// - **Dense** tables (every row has every schema key) emit `rows` as plain
+///   value-arrays aligned to `schema` — the compact, common case.
+/// - **Sparse** tables additionally emit a `present` array: for each row, the
+///   list of schema indices actually present. Each row's values are stored in
+///   `present` order, so absent keys are simply not listed (a present key with a
+///   `null` value still appears, with value `null`).
 fn lossless_table(arr: &[Value]) -> Option<String> {
+    encode_columnar(arr, "json_table")
+}
+
+/// Shared columnar encoder used by both the JSON-array crusher (`json_table`) and
+/// the NDJSON tabular compressor (`ndjson_table`). See [`lossless_table`] for the
+/// absent-vs-`null` semantics. `marker` is written as the `_omnicompress` tag and
+/// must be passed back to [`decode_columnar`] to decode.
+pub(crate) fn encode_columnar(arr: &[Value], marker: &str) -> Option<String> {
     use std::collections::HashSet;
 
     let mut schema: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    let mut rows: Vec<Vec<Value>> = Vec::with_capacity(arr.len());
 
     for item in arr {
         let obj = item.as_object()?;
@@ -68,23 +86,116 @@ fn lossless_table(arr: &[Value]) -> Option<String> {
         }
     }
 
-    for item in arr {
-        let obj = item.as_object().unwrap();
-        let row = schema
+    // Dense when every object contains every schema key.
+    let dense = arr
+        .iter()
+        .all(|item| item.as_object().unwrap().len() == schema.len());
+
+    let mut table = serde_json::Map::new();
+    table.insert("_omnicompress".into(), Value::from(marker));
+    table.insert("count".into(), Value::from(arr.len()));
+    table.insert("schema".into(), Value::from(schema.clone()));
+
+    if dense {
+        let rows: Vec<Value> = arr
             .iter()
-            .map(|key| obj.get(key).cloned().unwrap_or(Value::Null))
+            .map(|item| {
+                let obj = item.as_object().unwrap();
+                let row: Vec<Value> = schema
+                    .iter()
+                    .map(|key| obj.get(key).cloned().expect("dense: key present"))
+                    .collect();
+                Value::from(row)
+            })
             .collect();
-        rows.push(row);
+        table.insert("rows".into(), Value::from(rows));
+    } else {
+        let mut rows: Vec<Value> = Vec::with_capacity(arr.len());
+        let mut present: Vec<Value> = Vec::with_capacity(arr.len());
+        for item in arr {
+            let obj = item.as_object().unwrap();
+            let mut row_vals: Vec<Value> = Vec::new();
+            let mut row_idx: Vec<Value> = Vec::new();
+            for (i, key) in schema.iter().enumerate() {
+                if let Some(v) = obj.get(key) {
+                    row_idx.push(Value::from(i));
+                    row_vals.push(v.clone());
+                }
+            }
+            rows.push(Value::from(row_vals));
+            present.push(Value::from(row_idx));
+        }
+        table.insert("rows".into(), Value::from(rows));
+        table.insert("present".into(), Value::from(present));
     }
 
-    let table = serde_json::json!({
-        "_omnicompress": "json_table",
-        "count": arr.len(),
-        "schema": schema,
-        "rows": rows
-    });
+    Some(Value::Object(table).to_string())
+}
 
-    Some(table.to_string())
+/// Reverse of [`lossless_table`]: reconstruct the original JSON array (as a
+/// canonical JSON string) from a `json_table` document. Returns `None` if the
+/// input is not a well-formed `json_table` produced by this module.
+///
+/// Reconstruction is **data-lossless**: every value (including the absent-vs-`null`
+/// distinction) is recovered. Object key order and whitespace are canonicalised by
+/// `serde_json` — the recovered *data* is identical, not necessarily the original
+/// byte layout.
+pub fn restore_table(table_json: &str) -> Option<String> {
+    let arr = decode_columnar(table_json, "json_table")?;
+    Some(Value::from(arr).to_string())
+}
+
+/// Shared columnar decoder: reverse of [`encode_columnar`]. Reconstructs the
+/// original objects (as `Value`s), recovering the absent-vs-`null` distinction.
+/// Returns `None` unless the document is a well-formed table whose `_omnicompress`
+/// tag equals `marker`.
+pub(crate) fn decode_columnar(table_json: &str, marker: &str) -> Option<Vec<Value>> {
+    let v: Value = serde_json::from_str(table_json).ok()?;
+    let obj = v.as_object()?;
+    if obj.get("_omnicompress")?.as_str()? != marker {
+        return None;
+    }
+
+    let schema: Vec<&str> = obj
+        .get("schema")?
+        .as_array()?
+        .iter()
+        .map(|k| k.as_str())
+        .collect::<Option<Vec<_>>>()?;
+    let rows = obj.get("rows")?.as_array()?;
+    let present = obj.get("present").and_then(Value::as_array);
+
+    let mut out: Vec<Value> = Vec::with_capacity(rows.len());
+    for (r, row) in rows.iter().enumerate() {
+        let cells = row.as_array()?;
+        let mut rebuilt = serde_json::Map::new();
+        match present {
+            // Sparse: `present[r]` holds the schema index of each cell.
+            Some(p) => {
+                let idxs = p.get(r)?.as_array()?;
+                if idxs.len() != cells.len() {
+                    return None;
+                }
+                for (cell, idx) in cells.iter().zip(idxs) {
+                    let i = idx.as_u64()? as usize;
+                    let key = schema.get(i)?;
+                    rebuilt.insert((*key).to_string(), cell.clone());
+                }
+            }
+            // Dense: cells align 1:1 with the schema.
+            None => {
+                if cells.len() != schema.len() {
+                    return None;
+                }
+                for (key, cell) in schema.iter().zip(cells) {
+                    rebuilt.insert((*key).to_string(), cell.clone());
+                }
+            }
+        }
+        out.push(Value::Object(rebuilt));
+    }
+
+    Some(out)
 }
 
 impl Compressor for JsonCrusher {
@@ -300,63 +411,85 @@ mod tests {
 
 #[cfg(test)]
 mod lossless_tests {
-    use super::lossless_table;
+    use super::{lossless_table, restore_table};
     use serde_json::{json, Value};
 
+    /// Helper: assert that table → restore round-trips to the same data.
+    fn assert_roundtrip(arr: &[Value]) {
+        let table = lossless_table(arr).expect("table should build");
+        let restored = restore_table(&table).expect("table should restore");
+        let restored: Value = serde_json::from_str(&restored).unwrap();
+        assert_eq!(restored, Value::from(arr.to_vec()), "roundtrip must be lossless");
+    }
+
     #[test]
-    fn table_is_lossless_union_schema() {
+    fn table_carries_union_schema_and_count() {
         let arr = vec![
             json!({"a": 1, "b": 2}),
             json!({"a": 1, "b": 2, "owner": "me"}),
             json!({"a": 1, "b": 2}),
         ];
-        let res = lossless_table(&arr);
-        assert!(res.is_some());
-        
-        let parsed: Value = serde_json::from_str(&res.unwrap()).unwrap();
+        let parsed: Value = serde_json::from_str(&lossless_table(&arr).unwrap()).unwrap();
         let schema = parsed["schema"].as_array().unwrap();
         assert!(schema.iter().any(|v| v == "owner"));
         assert_eq!(parsed["count"], 3);
-        
-        let rows = parsed["rows"].as_array().unwrap();
-        assert_eq!(rows.len(), 3);
-        
-        let owner_idx = schema.iter().position(|v| v == "owner").unwrap();
-        assert_eq!(rows[0][owner_idx], Value::Null);
-        assert_eq!(rows[1][owner_idx], json!("me"));
-        assert_eq!(rows[2][owner_idx], Value::Null);
+        // Heterogeneous rows → sparse encoding carries a `present` map.
+        assert!(parsed.get("present").is_some(), "sparse table must record presence");
     }
 
     #[test]
     fn non_objects_return_none() {
-        let arr = vec![
-            json!({"a": 1}),
-            json!(5),
-            json!({"a": 2}),
-        ];
-        let res = lossless_table(&arr);
-        assert!(res.is_none());
+        let arr = vec![json!({"a": 1}), json!(5), json!({"a": 2})];
+        assert!(lossless_table(&arr).is_none());
     }
 
     #[test]
-    fn all_values_preserved() {
-        let mut arr = Vec::new();
-        for i in 0..5 {
-            arr.push(json!({"id": i, "v": format!("val-{}", i)}));
-        }
-        let res = lossless_table(&arr);
-        assert!(res.is_some());
-        
-        let parsed: Value = serde_json::from_str(&res.unwrap()).unwrap();
-        let rows = parsed["rows"].as_array().unwrap();
-        let schema = parsed["schema"].as_array().unwrap();
-        
-        let id_idx = schema.iter().position(|v| v == "id").unwrap();
-        let v_idx = schema.iter().position(|v| v == "v").unwrap();
+    fn dense_roundtrips() {
+        let arr: Vec<Value> = (0..5).map(|i| json!({"id": i, "v": format!("val-{i}")})).collect();
+        let parsed: Value = serde_json::from_str(&lossless_table(&arr).unwrap()).unwrap();
+        assert!(parsed.get("present").is_none(), "uniform rows must stay dense");
+        assert_roundtrip(&arr);
+    }
 
-        for i in 0..5 {
-            assert_eq!(rows[i][id_idx], i);
-            assert_eq!(rows[i][v_idx], json!(format!("val-{}", i)));
-        }
+    #[test]
+    fn sparse_roundtrips() {
+        let arr = vec![
+            json!({"a": 1, "b": 2}),
+            json!({"a": 1, "b": 2, "owner": "me"}),
+            json!({"b": 9}),
+        ];
+        assert_roundtrip(&arr);
+    }
+
+    /// The bug this fix targets: an absent key must NOT collapse into an explicit
+    /// `null`. `{}` and `{"a":null}` must round-trip distinctly.
+    #[test]
+    fn absent_key_is_distinct_from_explicit_null() {
+        let arr = vec![json!({"a": null}), json!({})];
+        let table = lossless_table(&arr).unwrap();
+        let restored: Value =
+            serde_json::from_str(&restore_table(&table).unwrap()).unwrap();
+        let items = restored.as_array().unwrap();
+        // Row 0 keeps an explicit null; row 1 has no key at all.
+        assert!(items[0].as_object().unwrap().contains_key("a"));
+        assert_eq!(items[0]["a"], Value::Null);
+        assert!(items[1].as_object().unwrap().is_empty());
+        // And the whole thing is byte-for-byte the same data going back out.
+        assert_eq!(restored, json!([{"a": null}, {}]));
+    }
+
+    #[test]
+    fn nested_values_roundtrip() {
+        let arr = vec![
+            json!({"id": 1, "tags": ["x", "y"], "meta": {"k": 1}}),
+            json!({"id": 2, "tags": [], "meta": {"k": 2, "z": null}}),
+        ];
+        assert_roundtrip(&arr);
+    }
+
+    #[test]
+    fn restore_rejects_non_table() {
+        assert!(restore_table(r#"{"hello":"world"}"#).is_none());
+        assert!(restore_table("not json").is_none());
     }
 }
