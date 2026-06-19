@@ -25,6 +25,58 @@ impl Tokenizer for HeuristicTokenizer {
     }
 }
 
+/// Contador BPE exato cl100k_base (tokenizer do GPT-4), proxy fiel vs o heurístico
+/// chars/4; ranks embutidos no tiktoken-rs (sem rede); construir 1× e reusar (não no
+/// hot path).
+pub struct ExactTokenizer {
+    bpe: tiktoken_rs::CoreBPE,
+}
+
+impl ExactTokenizer {
+    pub fn new() -> Self {
+        let bpe = tiktoken_rs::cl100k_base()
+            .expect("Falha ao inicializar o tokenizer cl100k_base do tiktoken-rs");
+        Self { bpe }
+    }
+}
+
+impl Default for ExactTokenizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Tokenizer for ExactTokenizer {
+    fn count(&self, text: &str) -> usize {
+        self.bpe.encode_ordinary(text).len()
+    }
+
+    fn fidelity(&self) -> &'static str {
+        "exact"
+    }
+}
+
+#[cfg(test)]
+mod exact_tests {
+    use super::*;
+
+    #[test]
+    fn count_empty_string() {
+        assert_eq!(ExactTokenizer::new().count(""), 0);
+    }
+
+    #[test]
+    fn count_hello_world() {
+        // "hello world" = ["hello", " world"] = 2 tokens in cl100k_base.
+        assert_eq!(ExactTokenizer::new().count("hello world"), 2);
+    }
+
+    #[test]
+    fn check_fidelity() {
+        assert_eq!(ExactTokenizer::new().fidelity(), "exact");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

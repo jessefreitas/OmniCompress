@@ -8,6 +8,7 @@ use crate::ccr::{CCRStore, MemoryStore};
 use crate::pipeline::CompressionPipeline;
 use crate::protection::CompressConfig;
 use crate::router::ContentRouter;
+use crate::tokenizer::ExactTokenizer;
 use crate::types::{Block, CompressResult, ContentKind, Role};
 
 /// Aggregated statistics for a single content kind (or overall).
@@ -53,7 +54,9 @@ impl BenchReport {
 pub fn bench(payloads: Vec<(String, String)>) -> BenchReport {
     let router = ContentRouter;
     let store: Arc<dyn CCRStore> = Arc::new(MemoryStore::default());
-    let pipeline = CompressionPipeline::new_arc(store.clone());
+    // Exact BPE tokenizer (cl100k) for HONEST token counts — the bench reports real
+    // token reductions, not the chars/4 heuristic. Built once, reused across files.
+    let pipeline = CompressionPipeline::with_tokenizer(store.clone(), Box::new(ExactTokenizer::new()));
 
     let cfg = CompressConfig {
         protect_recent: 0,

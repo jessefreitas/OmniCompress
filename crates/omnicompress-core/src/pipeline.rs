@@ -14,16 +14,29 @@ use crate::types::{Block, CcrRef, CompressResult, ContentKind, Transform};
 
 pub struct CompressionPipeline {
     router: ContentRouter,
-    tok: HeuristicTokenizer,
+    tok: Box<dyn Tokenizer>,
     ccr: Arc<dyn CCRStore>,
 }
 
 impl CompressionPipeline {
     /// Primary constructor: share ownership of the CCR store via `Arc`.
+    /// Uses the fast chars/4 heuristic — right for the hot path (proxy/lib),
+    /// where the token count is informational and exact BPE would add latency.
     pub fn new_arc(ccr: Arc<dyn CCRStore>) -> Self {
         Self {
             router: ContentRouter,
-            tok: HeuristicTokenizer,
+            tok: Box::new(HeuristicTokenizer),
+            ccr,
+        }
+    }
+
+    /// Constructor with an explicit tokenizer — use `ExactTokenizer` for honest,
+    /// BPE-accurate token measurement (e.g. the bench), where exactness matters
+    /// more than speed.
+    pub fn with_tokenizer(ccr: Arc<dyn CCRStore>, tok: Box<dyn Tokenizer>) -> Self {
+        Self {
+            router: ContentRouter,
+            tok,
             ccr,
         }
     }

@@ -132,7 +132,14 @@ pub fn handle_jsonrpc(req: &str, state: &McpState) -> String {
                         });
                     }
 
-                    let config = CompressConfig::default();
+                    // The MCP surface exposes a `retrieve` tool, so it's safe to use
+                    // the aggressive (lossy + CCR) mode for maximum compression — the
+                    // agent can expand any elided block by hash on demand. (The proxy,
+                    // which has no retrieve loop, stays on the lossless default.)
+                    let config = CompressConfig {
+                        lossless: false,
+                        ..CompressConfig::default()
+                    };
                     let result = state.pipeline.compress(blocks, &config);
 
                     let ccr_refs: Vec<Value> = result
