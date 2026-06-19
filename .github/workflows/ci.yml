@@ -17,6 +17,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pin Python so the PyO3 build is reproducible. Runner defaults drift (e.g.
+      # macos-latest ships Python 3.14, which PyO3 0.22 refuses), which would fail
+      # the omnicompress-py build during `cargo test --workspace`.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
