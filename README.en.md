@@ -48,6 +48,17 @@ your agent  →  [ OmniCompress compresses here ]  →  LLM (Anthropic · OpenAI
 | **Lossless** (default) | array → columnar table (all rows, shared schema); logs → dedup. Code/prose/nested objects pass through intact. **Zero loss, no retrieve.** | a proxy, or any consumer without a retrieve loop |
 | **Aggressive** (`lossless=false`) | samples arrays, elides code/prose/objects; original in the CCR. | only with a retrieve loop (e.g. MCP), where the agent can expand |
 
+## Content types (why compression varies)
+
+OmniCompress classifies each block and applies the right rule. The gain varies because **redundancy** varies — you can only compress what repeats:
+
+- 📊 **Logs** — near-identical lines repeated thousands of times → collapse with a count. Highest redundancy → **biggest gain**, and lossless (reconstructable).
+- 🔢 **JSON / tool outputs** (search results, listings, queries) — the same keys repeated on every row → a **columnar** form factors the schema out once. This is the **biggest token sink** in agent contexts.
+- 💻 **Code** — structure via AST; function bodies can be elided (aggressive mode only, recoverable via CCR).
+- 📝 **Prose** — running natural-language text (docs, chat, explanations, email). **Every word carries meaning — there's no structural pattern to factor out.** So it compresses little, and only extractively (aggressive); in lossless it's left **untouched on purpose** (cutting prose would lose meaning).
+
+**Rule of thumb:** the more structured and repetitive the content, the more it compresses **with zero loss**. Dense prose is the limit — and exactly where we stay conservative, not aggressive.
+
 ## Results (reproducible benchmark — **real BPE tokens**, cl100k via tiktoken)
 
 **Token** reduction (not character) by content type:

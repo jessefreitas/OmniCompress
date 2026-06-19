@@ -48,6 +48,17 @@ seu agente  →  [ OmniCompress comprime aqui ]  →  LLM (Anthropic · OpenAI �
 | **Lossless** (default) | array → tabela colunar (todas as linhas, schema fatorado); logs → dedup. Código/prosa/objeto aninhado passam intactos. **Zero perda, sem retrieve.** | proxy, ou qualquer consumidor sem loop de retrieve |
 | **Agressivo** (`lossless=false`) | amostra arrays, elide código/prosa/objetos; original no CCR. | só com loop de retrieve (ex.: MCP), onde o agente pode expandir |
 
+## Tipos de conteúdo (por que a compressão varia)
+
+O OmniCompress classifica cada bloco e aplica a regra certa. O ganho varia porque a **redundância** varia — só dá pra comprimir o que se repete:
+
+- 📊 **Logs** — linhas quase idênticas repetidas mil vezes → colapso com contagem. Redundância altíssima → **maior ganho**, e lossless (reconstruível).
+- 🔢 **JSON / tool-outputs** (resultado de busca, listagem, query) — as mesmas chaves repetidas em toda linha → forma **colunar** fatora o schema uma vez. É o **maior sink de token** dos agentes.
+- 💻 **Código** — estrutura via AST; corpo de função pode ser elidido (só no agressivo, recuperável via CCR).
+- 📝 **Prosa** — texto corrido em linguagem natural (documentação, chat, explicações, e-mail). **Cada palavra carrega significado — não há padrão estrutural pra fatorar.** Por isso comprime pouco e só de forma extractiva (agressivo); no lossless fica **intacta de propósito** (cortar prosa perderia sentido).
+
+**Regra de ouro:** quanto mais estruturado e repetitivo o conteúdo, mais ele comprime **sem perder nada**. Prosa densa é o limite — e é exatamente onde a gente é conservador, não agressivo.
+
 ## Resultados (bench reproduzível — **token BPE real**, cl100k via tiktoken)
 
 Redução de **token** (não de caractere) por tipo de conteúdo:
