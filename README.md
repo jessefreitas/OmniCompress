@@ -34,26 +34,27 @@ seu agente  →  [ OmniCompress comprime aqui ]  →  LLM (Anthropic · OpenAI �
 
 | Princípio | O que significa |
 |---|---|
-| 🔁 **Reversível (CCR)** | o original vai pro Compress-Cache-Retrieve e volta por hash sob demanda. **Lossless com retrieval — nunca perde dado.** |
+| 🟢 **Lossless por padrão** | no modo default, nada é descartado — o conteúdo comprimido contém todos os dados (array vira tabela colunar). **O modelo responde só com o que vê, sem precisar de retrieve.** |
 | ⚡ **Determinístico** | compressão por algoritmo (estatística + AST), **sem modelo no caminho quente**. Zero custo de inferência, milissegundos. |
 | 🧠 **Cache-aware** | prefixo byte-estável entre turnos — **não invalida o cache de prompt** do provedor (provado por teste). |
-| 📦 **Todo conteúdo** | JSON (array e objeto aninhado), código (AST tree-sitter), logs, prosa — não um nicho só. |
-| ✍️ **Input *e* output** | encolhe o que você manda **e** orienta o modelo a escrever mais enxuto (output custa até 5× no Opus). |
+| 🔁 **Modo agressivo + CCR (opt-in)** | pra compressão máxima, elide/amostra e guarda o original no Compress-Cache-Retrieve (volta por hash). **Exige um loop de retrieve** — use só onde o agente pode chamar a tool de expandir. |
 | 🔌 **Multi-superfície** | biblioteca, proxy HTTP drop-in, servidor MCP e CLI — pluga em qualquer fluxo. |
 | 🛡️ **Fail-open** | erro de compressão nunca falha a request nem perde conteúdo — passa intacto. |
 
-Nenhuma dessas, sozinha, é nova. **A combinação das sete numa camada só é o diferencial.**
+## Dois modos (escolha honesta)
+
+| Modo | O que faz | Quando usar |
+|---|---|---|
+| **Lossless** (default) | array → tabela colunar (todas as linhas, schema fatorado); logs → dedup. Código/prosa/objeto aninhado passam intactos. **Zero perda, sem retrieve.** | proxy, ou qualquer consumidor sem loop de retrieve |
+| **Agressivo** (`lossless=false`) | amostra arrays, elide código/prosa/objetos; original no CCR. | só com loop de retrieve (ex.: MCP), onde o agente pode expandir |
 
 ## Resultados (bench real, reproduzível)
 
-| Conteúdo | Redução |
-|---|---:|
-| Tool-output em array (recall/busca/query) | **~93%** |
-| Código (AST) | **~84–93%** |
-| Prosa | **~90%** |
-| JSON aninhado / config | **~28%** |
+**Lossless (default):** comprime o maior sink de tokens dos agentes — **tool-outputs em array** (recall/busca/query) — em **~40–70%** sem perder nada, e colapsa linhas de log repetidas. Código, prosa e objetos aninhados passam **intactos** (elidi-los seria lossy).
 
-> Medição honesta: rode você mesmo com `omnicompress bench <dir>`. Onde não há ganho real, reportamos zero — sem número inflado.
+**Agressivo + retrieve (opt-in):** array **~93%**, código **~84–93%**, prosa **~90%**, objeto aninhado **~28%** — com o original recuperável via CCR.
+
+> Medição honesta e verificada por harness de acurácia (`eval/`): rode você mesmo com `omnicompress bench <dir>`. No lossless, **o modelo responde igual ao contexto cheio** (fidelidade medida 100% num conjunto de queries que exigem o detalhe). Onde não há ganho real, reportamos zero — sem número inflado.
 
 ## Como usar
 

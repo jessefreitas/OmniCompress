@@ -34,26 +34,27 @@ your agent  →  [ OmniCompress compresses here ]  →  LLM (Anthropic · OpenAI
 
 | Principle | What it means |
 |---|---|
-| 🔁 **Reversible (CCR)** | the original goes to the Compress-Cache-Retrieve store and comes back by hash on demand. **Lossless-with-retrieval — never loses data.** |
+| 🟢 **Lossless by default** | in the default mode nothing is dropped — the compressed form holds all the data (an array becomes a columnar table). **The model answers from what it sees, no retrieve required.** |
 | ⚡ **Deterministic** | algorithmic compression (statistics + AST), **no model in the hot path**. Zero inference cost, milliseconds. |
 | 🧠 **Cache-aware** | byte-stable prefix across turns — it **doesn't invalidate the provider's prompt cache** (proven by test). |
-| 📦 **Every content type** | JSON (arrays and nested objects), code (tree-sitter AST), logs, prose — not a single niche. |
-| ✍️ **Input *and* output** | shrinks what you send **and** steers the model to write leaner (output costs up to 5× on Opus). |
+| 🔁 **Aggressive + CCR (opt-in)** | for maximum compression, sample/elide and store the original in the Compress-Cache-Retrieve store (back by hash). **Requires a retrieve loop** — use only where the agent can call an expand tool. |
 | 🔌 **Multi-surface** | library, drop-in HTTP proxy, MCP server, and CLI — plugs into any workflow. |
 | 🛡️ **Fail-open** | a compression error never fails the request or loses content — it passes through intact. |
 
-None of these is new on its own. **Combining all seven in a single layer is the differentiator.**
+## Two modes (an honest choice)
+
+| Mode | What it does | When to use |
+|---|---|---|
+| **Lossless** (default) | array → columnar table (all rows, shared schema); logs → dedup. Code/prose/nested objects pass through intact. **Zero loss, no retrieve.** | a proxy, or any consumer without a retrieve loop |
+| **Aggressive** (`lossless=false`) | samples arrays, elides code/prose/objects; original in the CCR. | only with a retrieve loop (e.g. MCP), where the agent can expand |
 
 ## Results (real, reproducible benchmark)
 
-| Content | Reduction |
-|---|---:|
-| Array tool output (recall/search/query) | **~93%** |
-| Code (AST) | **~84–93%** |
-| Prose | **~90%** |
-| Nested / config JSON | **~28%** |
+**Lossless (default):** compresses the biggest token sink in agent contexts — **array tool outputs** (recall/search/query) — by **~40–70%** with zero loss, and collapses repeated log lines. Code, prose and nested objects pass through **untouched** (eliding them would be lossy).
 
-> Honest measurement: run it yourself with `omnicompress bench <dir>`. Where there's no real gain, we report zero — no inflated numbers.
+**Aggressive + retrieve (opt-in):** array **~93%**, code **~84–93%**, prose **~90%**, nested object **~28%** — with the original recoverable via the CCR.
+
+> Honest measurement, verified by an accuracy harness (`eval/`): run it yourself with `omnicompress bench <dir>`. In lossless mode **the model answers the same as with full context** (measured fidelity 100% on a set of detail-seeking queries). Where there's no real gain, we report zero — no inflated numbers.
 
 ## Usage
 
