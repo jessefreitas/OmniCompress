@@ -2,7 +2,11 @@ use super::{Compressor, Outcome};
 use serde_json::Value;
 
 #[derive(Default)]
-pub struct JsonCrusher;
+pub struct JsonCrusher {
+    /// When `true`, compress losslessly (columnar table, all rows kept, no CCR).
+    /// When `false`, aggressive schema+sample with the original stored in the CCR.
+    pub lossless: bool,
+}
 
 /// Recursively elide large values inside a JSON structure.
 ///
@@ -44,6 +48,45 @@ fn elide(v: &Value, limit: usize) -> Value {
     }
 }
 
+/// Lossless columnar form of an array of objects: a single shared schema (the
+/// ordered union of all keys) plus one value-row per item (`null` for absent
+/// keys). Every value is preserved — reconstructable, no CCR needed. Returns
+/// `None` if any item is not an object (columnar does not apply).
+fn lossless_table(arr: &[Value]) -> Option<String> {
+    use std::collections::HashSet;
+
+    let mut schema: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut rows: Vec<Vec<Value>> = Vec::with_capacity(arr.len());
+
+    for item in arr {
+        let obj = item.as_object()?;
+        for key in obj.keys() {
+            if seen.insert(key.clone()) {
+                schema.push(key.clone());
+            }
+        }
+    }
+
+    for item in arr {
+        let obj = item.as_object().unwrap();
+        let row = schema
+            .iter()
+            .map(|key| obj.get(key).cloned().unwrap_or(Value::Null))
+            .collect();
+        rows.push(row);
+    }
+
+    let table = serde_json::json!({
+        "_omnicompress": "json_table",
+        "count": arr.len(),
+        "schema": schema,
+        "rows": rows
+    });
+
+    Some(table.to_string())
+}
+
 impl Compressor for JsonCrusher {
     fn name(&self) -> &'static str {
         "json_crusher"
@@ -76,7 +119,23 @@ impl Compressor for JsonCrusher {
 
         // ---- Case 1: array crushing (preserved) ----
         if arr.len() >= 20 {
-            // Schema = keys of the first object; bail if items aren't objects.
+            // Lossless: keep every row in a compact columnar table (no CCR write),
+            // so a consumer without a retrieve loop still has all the data.
+            if self.lossless {
+                if let Some(table) = lossless_table(&arr) {
+                    if table.len() < content.len() {
+                        return Outcome {
+                            compressed: table,
+                            original: None,
+                            detail: format!("json_table_lossless:{}", arr.len()),
+                        };
+                    }
+                    return Outcome::untouched(content);
+                }
+                return self.compress_large_object(&v, content);
+            }
+
+            // Aggressive: schema = keys of the first object; bail if items aren't objects.
             let keys: Vec<String> = match arr.first() {
                 Some(Value::Object(o)) => o.keys().cloned().collect(),
                 _ => {
@@ -117,6 +176,10 @@ impl JsonCrusher {
     /// while preserving all keys. Falls back to `untouched` if the root is not
     /// an object, is too small, or if the skeleton doesn't shrink the payload.
     fn compress_large_object(&self, v: &Value, content: &str) -> Outcome {
+        // Lossless mode never elides values — leave the nested object intact.
+        if self.lossless {
+            return Outcome::untouched(content);
+        }
         // Only applies when the array case did NOT and the root is a big object.
         if !matches!(v, Value::Object(_)) {
             return Outcome::untouched(content);
@@ -232,5 +295,68 @@ mod tests {
             out.original.is_none(),
             "objeto pequeno não deve ser comprimido"
         );
+    }
+}
+
+#[cfg(test)]
+mod lossless_tests {
+    use super::lossless_table;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn table_is_lossless_union_schema() {
+        let arr = vec![
+            json!({"a": 1, "b": 2}),
+            json!({"a": 1, "b": 2, "owner": "me"}),
+            json!({"a": 1, "b": 2}),
+        ];
+        let res = lossless_table(&arr);
+        assert!(res.is_some());
+        
+        let parsed: Value = serde_json::from_str(&res.unwrap()).unwrap();
+        let schema = parsed["schema"].as_array().unwrap();
+        assert!(schema.iter().any(|v| v == "owner"));
+        assert_eq!(parsed["count"], 3);
+        
+        let rows = parsed["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        
+        let owner_idx = schema.iter().position(|v| v == "owner").unwrap();
+        assert_eq!(rows[0][owner_idx], Value::Null);
+        assert_eq!(rows[1][owner_idx], json!("me"));
+        assert_eq!(rows[2][owner_idx], Value::Null);
+    }
+
+    #[test]
+    fn non_objects_return_none() {
+        let arr = vec![
+            json!({"a": 1}),
+            json!(5),
+            json!({"a": 2}),
+        ];
+        let res = lossless_table(&arr);
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn all_values_preserved() {
+        let mut arr = Vec::new();
+        for i in 0..5 {
+            arr.push(json!({"id": i, "v": format!("val-{}", i)}));
+        }
+        let res = lossless_table(&arr);
+        assert!(res.is_some());
+        
+        let parsed: Value = serde_json::from_str(&res.unwrap()).unwrap();
+        let rows = parsed["rows"].as_array().unwrap();
+        let schema = parsed["schema"].as_array().unwrap();
+        
+        let id_idx = schema.iter().position(|v| v == "id").unwrap();
+        let v_idx = schema.iter().position(|v| v == "v").unwrap();
+
+        for i in 0..5 {
+            assert_eq!(rows[i][id_idx], i);
+            assert_eq!(rows[i][v_idx], json!(format!("val-{}", i)));
+        }
     }
 }

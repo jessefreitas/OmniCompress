@@ -35,11 +35,13 @@ impl CompressionPipeline {
     }
 
     /// Select the appropriate compressor for a classified content kind.
-    fn pick(&self, kind: ContentKind) -> Box<dyn Compressor> {
+    fn pick(&self, kind: ContentKind, cfg: &CompressConfig) -> Box<dyn Compressor> {
         match kind {
-            ContentKind::Json => Box::new(JsonCrusher),
-            ContentKind::Code => Box::new(CodeCompressor),
-            ContentKind::Prose => Box::new(crate::compressor::prose::ProseCompressor),
+            ContentKind::Json => Box::new(JsonCrusher { lossless: cfg.lossless }),
+            ContentKind::Code => Box::new(CodeCompressor { lossless: cfg.lossless }),
+            ContentKind::Prose => {
+                Box::new(crate::compressor::prose::ProseCompressor { lossless: cfg.lossless })
+            }
             ContentKind::Log | ContentKind::Diff => Box::new(LogTextCompressor),
             ContentKind::Unknown => Box::new(PassThrough),
         }
@@ -54,7 +56,7 @@ impl CompressionPipeline {
     ///   replace block content with compressed+marker, record `CcrRef` + `Transform`.
     /// - If CCR write fails: keep original content (no data loss).
     pub fn compress(&self, messages: Vec<Block>, cfg: &CompressConfig) -> CompressResult {
-        self.compress_with(messages, cfg, |kind| self.pick(kind))
+        self.compress_with(messages, cfg, |kind| self.pick(kind, cfg))
     }
 
     /// Internal workhorse that accepts an injectable `picker` closure.
@@ -133,10 +135,19 @@ impl CompressionPipeline {
                     }
                 }
                 None => {
-                    // Compressor left content untouched or returned compressed without CCR.
+                    // Untouched, or a lossless transform (compressed without a CCR write).
+                    let changed = outcome.compressed != block.content;
                     let mut nb = block;
                     nb.content = outcome.compressed;
                     tokens_after += self.tok.count(&nb.content);
+                    if changed {
+                        // Record the transform for observability; no CcrRef since
+                        // nothing was elided (the compressed form is self-contained).
+                        transforms.push(Transform {
+                            unit: comp_name.to_string(),
+                            detail: outcome.detail,
+                        });
+                    }
                     out_msgs.push(nb);
                 }
             }
@@ -180,6 +191,8 @@ mod tests {
             msgs.push(Block::from_text(Role::Assistant, &format!("ok {i}")));
         }
 
+        // Default is lossless: the old JSON array compresses to a columnar table
+        // (all rows kept) with NO CCR write — the data stays in the visible content.
         let r = pipe.compress(msgs, &CompressConfig::default());
         assert!(
             r.tokens_after < r.tokens_before,
@@ -187,12 +200,30 @@ mod tests {
             r.tokens_before,
             r.tokens_after
         );
-        assert_eq!(r.ccr_refs.len(), 1, "should store exactly 1 original in CCR");
+        assert_eq!(r.ccr_refs.len(), 0, "lossless mode stores nothing in the CCR");
         assert_eq!(
             r.transforms.len(),
             1,
-            "should record exactly 1 Transform entry"
+            "should record exactly 1 lossless Transform entry"
         );
+    }
+
+    #[test]
+    fn aggressive_mode_stores_original_in_ccr() {
+        let store = Arc::new(MemoryStore::default());
+        let pipe = CompressionPipeline::new_arc(store.clone());
+        let mut msgs = vec![Block::tool(Role::User, &big_json(), "search")];
+        for i in 0..6 {
+            msgs.push(Block::from_text(Role::Assistant, &format!("ok {i}")));
+        }
+        let cfg = CompressConfig {
+            lossless: false,
+            ..CompressConfig::default()
+        };
+        let r = pipe.compress(msgs, &cfg);
+        assert!(r.tokens_after < r.tokens_before);
+        assert_eq!(r.ccr_refs.len(), 1, "aggressive mode stores the original in CCR");
+        assert_eq!(r.transforms.len(), 1);
     }
 
     #[test]

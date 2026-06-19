@@ -60,6 +60,7 @@ pub fn bench(payloads: Vec<(String, String)>) -> BenchReport {
         min_chars_to_compress: 1,
         excluded_tools: vec![],
         cache_stable: false,
+        lossless: true,
     };
 
     let mut report = BenchReport {
@@ -148,9 +149,13 @@ mod tests {
             .by_kind
             .get("Json")
             .expect("expected a Json bucket in by_kind");
+        // Lossless default: a JSON array is rewritten as a columnar table (all
+        // rows kept, shared schema). It compresses by factoring out the repeated
+        // keys; repeated *values* are kept, so the ratio is more modest than the
+        // aggressive sample-and-CCR path but loses nothing.
         assert!(
-            json_stats.ratio() < 0.5,
-            "JSON payload should compress below 0.5, got {}",
+            json_stats.ratio() < 0.85,
+            "JSON payload should still compress losslessly, got {}",
             json_stats.ratio()
         );
 

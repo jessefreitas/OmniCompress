@@ -1,7 +1,11 @@
 use super::{Compressor, Outcome};
 
 #[derive(Default)]
-pub struct ProseCompressor;
+pub struct ProseCompressor {
+    /// When `true`, prose is left untouched (extractive elision drops the middle,
+    /// which is lossy and unrecoverable without a retrieve loop).
+    pub lossless: bool,
+}
 
 const HEAD: usize = 3;
 const TAIL: usize = 2;
@@ -43,6 +47,9 @@ impl Compressor for ProseCompressor {
     }
 
     fn compress(&self, content: &str) -> Outcome {
+        if self.lossless {
+            return Outcome::untouched(content);
+        }
         if content.len() < 800 {
             return Outcome::untouched(content);
         }

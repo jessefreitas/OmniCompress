@@ -19,6 +19,15 @@ pub struct CompressConfig {
     /// stays byte-stable across turns and the cache holds. Trade-off: even the most
     /// recent large output is compressed (recoverable via CCR).
     pub cache_stable: bool,
+    /// Lossless mode: when `true`, compressors NEVER drop information — they only
+    /// apply reversible-in-place transforms (e.g. a JSON array becomes a compact
+    /// columnar table keeping every row). Nothing is sent to the CCR, so the model
+    /// can answer from the compressed view alone — no retrieve loop required.
+    /// When `false`, aggressive lossy compression (sampling, elision) is used and
+    /// the original is stored in the CCR for on-demand retrieval. Default `true`:
+    /// a consumer without a retrieve path (e.g. a passthrough proxy) must never
+    /// silently lose data.
+    pub lossless: bool,
 }
 
 impl Default for CompressConfig {
@@ -31,6 +40,7 @@ impl Default for CompressConfig {
                 .map(|s| s.to_string())
                 .collect(),
             cache_stable: false,
+            lossless: true,
         }
     }
 }

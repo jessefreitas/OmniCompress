@@ -10,7 +10,11 @@ use super::{Compressor, Outcome};
 use tree_sitter::{Node, Parser};
 
 #[derive(Default)]
-pub struct CodeCompressor;
+pub struct CodeCompressor {
+    /// When `true`, code is left untouched (body elision is lossy and
+    /// unrecoverable without a retrieve loop).
+    pub lossless: bool,
+}
 
 impl Compressor for CodeCompressor {
     fn name(&self) -> &'static str {
@@ -18,6 +22,9 @@ impl Compressor for CodeCompressor {
     }
 
     fn compress(&self, content: &str) -> Outcome {
+        if self.lossless {
+            return Outcome::untouched(content);
+        }
         // Only bother for payloads large enough to benefit (~100 tokens).
         if content.len() < 400 {
             return Outcome::untouched(content);
