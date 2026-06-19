@@ -84,11 +84,25 @@ async fn proxy(
 
     let status_code =
         StatusCode::from_u16(upstream_response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let bytes = upstream_response.bytes().await.unwrap_or_default();
 
-    Response::builder()
-        .status(status_code)
-        .body(Body::from(bytes))
+    // Copy the upstream RESPONSE headers so streaming metadata survives — above all
+    // `content-type: text/event-stream` for SSE, which Claude Code and Codex rely on.
+    // Skip length/encoding headers that no longer match a re-streamed body.
+    let resp_headers = upstream_response.headers().clone();
+    let mut builder = Response::builder().status(status_code);
+    for (name, value) in resp_headers.iter() {
+        let n = name.as_str();
+        if n == "content-length" || n == "transfer-encoding" {
+            continue;
+        }
+        builder = builder.header(name.clone(), value.clone());
+    }
+
+    // Stream the body through byte-for-byte — never buffer or re-parse the response.
+    // The proxy only ever compresses the REQUEST; the response passes untouched so
+    // token-by-token streaming (SSE) is preserved end to end.
+    builder
+        .body(Body::from_stream(upstream_response.bytes_stream()))
         .unwrap_or_else(|_| {
             Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
@@ -251,5 +265,34 @@ mod tests {
             .await
             .expect("oneshot should succeed");
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn preserves_upstream_sse_content_type() {
+        // The response is streamed through; the upstream's SSE content-type must
+        // survive, or the client won't treat the body as an event stream.
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                // set_body_raw sets the content-type explicitly; set_body_string would
+                // override it to text/plain, masking what we're actually testing.
+                ResponseTemplate::new(200)
+                    .set_body_raw("data: hi\n\n".as_bytes(), "text/event-stream"),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let body = compressible_body(json!({"model": "gpt-4"}));
+        let response = post_to(app(mock.uri()), "/v1/chat/completions", body).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("text/event-stream"),
+            "upstream SSE content-type must survive the proxy"
+        );
     }
 }

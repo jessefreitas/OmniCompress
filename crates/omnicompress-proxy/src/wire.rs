@@ -54,7 +54,15 @@ fn compress_messages_in_place(body: &[u8]) -> Vec<u8> {
     }
 
     let pipeline = CompressionPipeline::new_arc(Arc::new(MemoryStore::default()));
-    let result = pipeline.compress(blocks, &CompressConfig::default());
+    // cache_stable: a block's compressed form is position-independent, so the prefix
+    // stays byte-stable as the conversation grows and the provider's prompt cache keeps
+    // hitting. Without it, an old message flips bytes as it leaves the recent window,
+    // busting the cache → the user pays MORE, the opposite of the product's promise.
+    let cfg = CompressConfig {
+        cache_stable: true,
+        ..CompressConfig::default()
+    };
+    let result = pipeline.compress(blocks, &cfg);
 
     for (k, &src_idx) in src_indices.iter().enumerate() {
         if let Some(Value::Object(obj)) = messages.get_mut(src_idx) {
@@ -120,6 +128,25 @@ mod tests {
         assert_eq!(parsed["temperature"], serde_json::json!(0.2));
         assert!(parsed["messages"].is_array());
         assert!(out.len() < body.len(), "output should be smaller: {} vs {}", out.len(), body.len());
+    }
+
+    #[test]
+    fn cache_stable_compresses_even_a_lone_recent_message() {
+        // A single big-array message would be protected by the recent-window in the
+        // default config; the proxy uses cache_stable, which ignores recency, so it
+        // still compresses — keeping the prefix byte-stable across turns.
+        let req = serde_json::json!({
+            "model": "x",
+            "messages": [{"role": "user", "content": compressible_json(60)}]
+        });
+        let body = serde_json::to_vec(&req).unwrap();
+        let out = compress_openai_request(&body);
+        assert!(
+            out.len() < body.len(),
+            "cache_stable should compress the lone message: {} vs {}",
+            out.len(),
+            body.len()
+        );
     }
 
     #[test]
