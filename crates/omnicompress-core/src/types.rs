@@ -11,6 +11,8 @@ pub enum Role {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ContentKind {
     Json,
+    /// Line-oriented tabular data: NDJSON/JSONL or CSV/TSV.
+    Tabular,
     Code,
     Log,
     Prose,

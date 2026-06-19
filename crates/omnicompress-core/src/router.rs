@@ -9,11 +9,20 @@ impl ContentRouter {
     pub fn route(&self, content: &str) -> ContentKind {
         let t = content.trim_start();
 
-        // JSON: must start with `{` or `[` and parse cleanly.
+        // JSON: must start with `{` or `[` and parse cleanly (a single value).
         if (t.starts_with('{') || t.starts_with('['))
             && serde_json::from_str::<serde_json::Value>(content).is_ok()
         {
             return ContentKind::Json;
+        }
+
+        // Tabular: NDJSON/JSONL (one JSON object per line) or CSV/TSV. Checked
+        // before code/log so a table of records isn't misread by keyword/prefix
+        // heuristics.
+        if crate::compressor::tabular::parse_ndjson(content).is_some()
+            || crate::compressor::tabular::parse_delimited(content).is_some()
+        {
+            return ContentKind::Tabular;
         }
 
         // Diff: common unified-diff header patterns.

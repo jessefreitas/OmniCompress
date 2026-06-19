@@ -3,6 +3,7 @@ pub mod json_crusher;
 pub mod log_text;
 pub mod code;
 pub mod prose;
+pub mod tabular;
 
 pub use passthrough::PassThrough;
 
