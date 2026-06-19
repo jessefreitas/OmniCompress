@@ -48,13 +48,20 @@ seu agente  →  [ OmniCompress comprime aqui ]  →  LLM (Anthropic · OpenAI �
 | **Lossless** (default) | array → tabela colunar (todas as linhas, schema fatorado); logs → dedup. Código/prosa/objeto aninhado passam intactos. **Zero perda, sem retrieve.** | proxy, ou qualquer consumidor sem loop de retrieve |
 | **Agressivo** (`lossless=false`) | amostra arrays, elide código/prosa/objetos; original no CCR. | só com loop de retrieve (ex.: MCP), onde o agente pode expandir |
 
-## Resultados (bench real, reproduzível)
+## Resultados (bench reproduzível — **token BPE real**, cl100k via tiktoken)
 
-**Lossless (default):** comprime o maior sink de tokens dos agentes — **tool-outputs em array** (recall/busca/query) — em **~40–70%** sem perder nada, e colapsa linhas de log repetidas. Código, prosa e objetos aninhados passam **intactos** (elidi-los seria lossy).
+Redução de **token** (não de caractere) por tipo de conteúdo:
 
-**Agressivo + retrieve (opt-in):** array **~93%**, código **~84–93%**, prosa **~90%**, objeto aninhado **~28%** — com o original recuperável via CCR.
+| Conteúdo | Lossless (default) | Agressivo (+retrieve) |
+|---|---:|---:|
+| Logs repetitivos | **97%** | 97% |
+| JSON / tool-outputs | **~33–52%** | **69%** |
+| Código | 0% (intacto) | 58% |
+| Prosa | 0% (intacto) | 41% |
 
-> Medição honesta e verificada por harness de acurácia (`eval/`): rode você mesmo com `omnicompress bench <dir>`. No lossless, **o modelo responde igual ao contexto cheio** (fidelidade medida 100% num conjunto de queries que exigem o detalhe). Onde não há ganho real, reportamos zero — sem número inflado.
+No lossless, código/prosa/objeto aninhado passam **intactos** (elidi-los seria lossy); o ganho vem de logs e da forma colunar de arrays — **zero perda, sem retrieve**. O agressivo amostra/elide e guarda o original no CCR (**exige loop de retrieve**).
+
+> Medição honesta: **tokens reais (cl100k)**, não estimativa por caractere — `chars/4` subestimava JSON em ~38%. Rode você mesmo: `omnicompress bench <dir>`. Verificado por harness de acurácia (`eval/`): no lossless o modelo responde **igual ao contexto cheio**. Onde não há ganho real, reportamos **zero** — sem número inflado.
 
 ## Como usar
 

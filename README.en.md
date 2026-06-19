@@ -48,13 +48,20 @@ your agent  →  [ OmniCompress compresses here ]  →  LLM (Anthropic · OpenAI
 | **Lossless** (default) | array → columnar table (all rows, shared schema); logs → dedup. Code/prose/nested objects pass through intact. **Zero loss, no retrieve.** | a proxy, or any consumer without a retrieve loop |
 | **Aggressive** (`lossless=false`) | samples arrays, elides code/prose/objects; original in the CCR. | only with a retrieve loop (e.g. MCP), where the agent can expand |
 
-## Results (real, reproducible benchmark)
+## Results (reproducible benchmark — **real BPE tokens**, cl100k via tiktoken)
 
-**Lossless (default):** compresses the biggest token sink in agent contexts — **array tool outputs** (recall/search/query) — by **~40–70%** with zero loss, and collapses repeated log lines. Code, prose and nested objects pass through **untouched** (eliding them would be lossy).
+**Token** reduction (not character) by content type:
 
-**Aggressive + retrieve (opt-in):** array **~93%**, code **~84–93%**, prose **~90%**, nested object **~28%** — with the original recoverable via the CCR.
+| Content | Lossless (default) | Aggressive (+retrieve) |
+|---|---:|---:|
+| Repetitive logs | **97%** | 97% |
+| JSON / tool outputs | **~33–52%** | **69%** |
+| Code | 0% (untouched) | 58% |
+| Prose | 0% (untouched) | 41% |
 
-> Honest measurement, verified by an accuracy harness (`eval/`): run it yourself with `omnicompress bench <dir>`. In lossless mode **the model answers the same as with full context** (measured fidelity 100% on a set of detail-seeking queries). Where there's no real gain, we report zero — no inflated numbers.
+In lossless mode code/prose/nested objects pass through **untouched** (eliding them would be lossy); the gains come from logs and the columnar array form — **zero loss, no retrieve**. Aggressive samples/elides and stores the original in the CCR (**requires a retrieve loop**).
+
+> Honest measurement: **real tokens (cl100k)**, not a per-character estimate — `chars/4` undercounted JSON by ~38%. Run it yourself: `omnicompress bench <dir>`. Verified by an accuracy harness (`eval/`): in lossless mode the model answers **the same as with full context**. Where there's no real gain, we report **zero** — no inflated numbers.
 
 ## Usage
 
