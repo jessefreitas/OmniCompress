@@ -23,35 +23,140 @@ fn role_from(s: &str) -> Role {
     }
 }
 
+/// Collect every compressible text location in `messages`, in a deterministic
+/// order, as `(role, text)`. Handles both the OpenAI shape (`content` is a string)
+/// and the Anthropic shape (`content` is an array of blocks): `text` blocks and
+/// `tool_result` blocks (string content, or a nested array of `text` blocks — where
+/// the bulk of Claude's tool output lives). MUST mirror `apply_texts` exactly so the
+/// compressed results map back to the same slots.
+fn collect_texts(messages: &[Value]) -> Vec<(Role, String)> {
+    let mut out = Vec::new();
+    for msg in messages {
+        let role = role_from(msg.get("role").and_then(Value::as_str).unwrap_or(""));
+        let content = match msg.get("content") {
+            Some(c) => c,
+            None => continue,
+        };
+        if let Some(s) = content.as_str() {
+            out.push((role, s.to_string()));
+        } else if let Some(arr) = content.as_array() {
+            for block in arr {
+                let btype = block.get("type").and_then(Value::as_str).unwrap_or("");
+                if btype == "text" {
+                    if let Some(t) = block.get("text").and_then(Value::as_str) {
+                        out.push((role, t.to_string()));
+                    }
+                } else if btype == "tool_result" {
+                    match block.get("content") {
+                        Some(tc) if tc.is_string() => {
+                            out.push((role, tc.as_str().unwrap_or("").to_string()))
+                        }
+                        Some(tc) => {
+                            if let Some(inner) = tc.as_array() {
+                                for ib in inner {
+                                    if ib.get("type").and_then(Value::as_str) == Some("text") {
+                                        if let Some(itx) = ib.get("text").and_then(Value::as_str) {
+                                            out.push((role, itx.to_string()));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Write `compressed[i]` back into each compressible slot, walking `messages` in the
+/// SAME order as `collect_texts` (the alignment invariant). serde_json has no
+/// `as_str_mut`, so a string slot is replaced wholesale with `Value::String`.
+fn apply_texts(messages: &mut [Value], compressed: &[String]) {
+    let mut i = 0;
+    for msg in messages.iter_mut() {
+        if i >= compressed.len() {
+            break;
+        }
+        let content = match msg.get_mut("content") {
+            Some(c) => c,
+            None => continue,
+        };
+        if content.is_string() {
+            *content = Value::String(compressed[i].clone());
+            i += 1;
+        } else if let Some(arr) = content.as_array_mut() {
+            for block in arr.iter_mut() {
+                if i >= compressed.len() {
+                    break;
+                }
+                let btype = block.get("type").and_then(Value::as_str).unwrap_or("");
+                if btype == "text" {
+                    if let Some(t) = block.get_mut("text") {
+                        if t.is_string() {
+                            *t = Value::String(compressed[i].clone());
+                            i += 1;
+                        }
+                    }
+                } else if btype == "tool_result" {
+                    match block.get_mut("content") {
+                        Some(tc) if tc.is_string() => {
+                            *tc = Value::String(compressed[i].clone());
+                            i += 1;
+                        }
+                        Some(tc) => {
+                            if let Some(inner) = tc.as_array_mut() {
+                                for ib in inner.iter_mut() {
+                                    if i >= compressed.len() {
+                                        break;
+                                    }
+                                    if ib.get("type").and_then(Value::as_str) == Some("text") {
+                                        if let Some(itx) = ib.get_mut("text") {
+                                            if itx.is_string() {
+                                                *itx = Value::String(compressed[i].clone());
+                                                i += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Compress the `messages` array in `body` in place, preserving all other fields.
-/// Fail-open: returns `body.to_vec()` unchanged on any parse/serialise failure or
-/// when there is no `messages` array to compress.
+/// Handles OpenAI (string content) and Anthropic (content-block arrays, incl. nested
+/// `tool_result`). Fail-open: returns `body.to_vec()` unchanged on any parse/serialise
+/// failure or when there is nothing compressible.
 fn compress_messages_in_place(body: &[u8]) -> Vec<u8> {
     let mut root: Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(_) => return body.to_vec(),
     };
 
-    let messages = match root.get_mut("messages") {
-        Some(Value::Array(arr)) => arr,
-        _ => return body.to_vec(),
+    let collected = match root.get("messages").and_then(Value::as_array) {
+        Some(arr) => collect_texts(arr),
+        None => return body.to_vec(),
     };
-
-    // Build blocks only for messages whose `content` is a plain string; remember
-    // their indices so we can map the compressed content back afterwards.
-    let mut blocks: Vec<Block> = Vec::new();
-    let mut src_indices: Vec<usize> = Vec::new();
-    for (idx, item) in messages.iter().enumerate() {
-        let role = role_from(item.get("role").and_then(Value::as_str).unwrap_or(""));
-        if let Some(content) = item.get("content").and_then(Value::as_str) {
-            blocks.push(Block {
-                role,
-                content: content.to_string(),
-                tool_name: None,
-            });
-            src_indices.push(idx);
-        }
+    if collected.is_empty() {
+        return body.to_vec();
     }
+
+    let blocks: Vec<Block> = collected
+        .into_iter()
+        .map(|(role, content)| Block {
+            role,
+            content,
+            tool_name: None,
+        })
+        .collect();
 
     let pipeline = CompressionPipeline::new_arc(Arc::new(MemoryStore::default()));
     // cache_stable: a block's compressed form is position-independent, so the prefix
@@ -63,15 +168,10 @@ fn compress_messages_in_place(body: &[u8]) -> Vec<u8> {
         ..CompressConfig::default()
     };
     let result = pipeline.compress(blocks, &cfg);
+    let compressed: Vec<String> = result.messages.iter().map(|b| b.content.clone()).collect();
 
-    for (k, &src_idx) in src_indices.iter().enumerate() {
-        if let Some(Value::Object(obj)) = messages.get_mut(src_idx) {
-            if let Some(field) = obj.get_mut("content") {
-                if field.is_string() {
-                    *field = Value::String(result.messages[k].content.clone());
-                }
-            }
-        }
+    if let Some(arr) = root.get_mut("messages").and_then(Value::as_array_mut) {
+        apply_texts(arr, &compressed);
     }
 
     serde_json::to_vec(&root).unwrap_or_else(|_| body.to_vec())
@@ -172,5 +272,46 @@ mod tests {
         let out = compress_anthropic_request(&body);
         let parsed: Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(parsed["system"], "you are helpful");
+    }
+
+    #[test]
+    fn anthropic_content_blocks_are_compressed() {
+        // Anthropic shape: content is an ARRAY of blocks. The big tool_result is
+        // where Claude's bloat lives — a string-only parser would skip it entirely.
+        let req = serde_json::json!({
+            "model": "claude-3",
+            "messages": [
+                { "role": "user", "content": [
+                    { "type": "text", "text": "here are the search results" },
+                    { "type": "tool_result", "content": compressible_json(60) }
+                ]},
+                { "role": "assistant", "content": "ok" }
+            ]
+        });
+        let body = serde_json::to_vec(&req).unwrap();
+        let out = compress_anthropic_request(&body);
+        assert!(out.len() < body.len(), "block content must compress: {} vs {}", out.len(), body.len());
+
+        // Structure preserved: still 2 blocks, tool_result still present.
+        let parsed: Value = serde_json::from_slice(&out).unwrap();
+        let blocks = parsed["messages"][0]["content"].as_array().expect("content array");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[1]["type"], "tool_result");
+    }
+
+    #[test]
+    fn anthropic_nested_tool_result_array_is_compressed() {
+        // tool_result.content can itself be an array of text blocks (common in Claude).
+        let req = serde_json::json!({
+            "model": "claude-3",
+            "messages": [{ "role": "user", "content": [
+                { "type": "tool_result", "content": [
+                    { "type": "text", "text": compressible_json(60) }
+                ]}
+            ]}]
+        });
+        let body = serde_json::to_vec(&req).unwrap();
+        let out = compress_anthropic_request(&body);
+        assert!(out.len() < body.len(), "nested tool_result text must compress");
     }
 }
