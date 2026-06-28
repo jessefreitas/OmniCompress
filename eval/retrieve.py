@@ -6,7 +6,7 @@ import urllib.request
 import urllib.error
 from typing import Callable
 
-from accuracy import Item, load_dataset, _norm, default_tokenizer
+from accuracy import load_dataset, _norm, default_tokenizer
 from providers import OpenAICompatProvider
 
 
@@ -155,7 +155,6 @@ def retrieve_aware_run(
     """Run baseline vs compressed-with-retrieve evaluation."""
     import omnicompress
 
-    items: list[Item] = []
     provider_full = OpenAICompatProvider(base_url, model, api_key)
 
     per_item = []
@@ -168,7 +167,6 @@ def retrieve_aware_run(
     sum_tokens_comp = 0
 
     for item in dataset:
-        items.append(item)
         sess = omnicompress.OmniCompressSession()
         comp = sess.compress(item.context)
         comp_msgs = [
@@ -219,14 +217,18 @@ def retrieve_aware_run(
             }
         )
 
-    n = len(items)
+    n = len(per_item)
     mean_ratio = (sum_ratio / n) if n else 0.0
     fidelity_rate = (fidelity_hits / n) if n else 0.0
     accuracy_full = (acc_full_hits / n) if n else 0.0
     accuracy_comp = (acc_comp_hits / n) if n else 0.0
     retrieve_rate = (retrieve_items / n) if n else 0.0
+    # Clamp at 0: aggressive-mode inflation could otherwise report "negative savings",
+    # which is meaningless on a savings dashboard.
     tokens_saved_pct = (
-        (1.0 - (sum_tokens_comp / sum_tokens_full)) * 100.0 if sum_tokens_full else 0.0
+        max(0.0, (1.0 - (sum_tokens_comp / sum_tokens_full)) * 100.0)
+        if sum_tokens_full
+        else 0.0
     )
 
     return {

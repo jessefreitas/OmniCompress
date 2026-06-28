@@ -149,6 +149,48 @@ pub fn restore_table(table_json: &str) -> Option<String> {
 /// original objects (as `Value`s), recovering the absent-vs-`null` distinction.
 /// Returns `None` unless the document is a well-formed table whose `_omnicompress`
 /// tag equals `marker`.
+/// Extract the column-name schema, failing (`None`) if any entry is not a string.
+fn decode_schema(obj: &serde_json::Map<String, Value>) -> Option<Vec<&str>> {
+    obj.get("schema")?
+        .as_array()?
+        .iter()
+        .map(|k| k.as_str())
+        .collect::<Option<Vec<_>>>()
+}
+
+/// Rebuild one object from its row. `idxs = Some(..)` is the sparse encoding (each cell
+/// carries its schema index); `None` is the dense encoding (cells align 1:1 with the
+/// schema). Insertion order matches the original — cell order when sparse, schema order
+/// when dense — and every original `?`/length-mismatch failure is preserved.
+fn decode_row(
+    schema: &[&str],
+    cells: &[Value],
+    idxs: Option<&[Value]>,
+) -> Option<serde_json::Map<String, Value>> {
+    let mut rebuilt = serde_json::Map::new();
+    match idxs {
+        Some(idxs) => {
+            if idxs.len() != cells.len() {
+                return None;
+            }
+            for (cell, idx) in cells.iter().zip(idxs) {
+                let i = idx.as_u64()? as usize;
+                let key = schema.get(i)?;
+                rebuilt.insert((*key).to_string(), cell.clone());
+            }
+        }
+        None => {
+            if cells.len() != schema.len() {
+                return None;
+            }
+            for (key, cell) in schema.iter().zip(cells) {
+                rebuilt.insert((*key).to_string(), cell.clone());
+            }
+        }
+    }
+    Some(rebuilt)
+}
+
 pub(crate) fn decode_columnar(table_json: &str, marker: &str) -> Option<Vec<Value>> {
     let v: Value = serde_json::from_str(table_json).ok()?;
     let obj = v.as_object()?;
@@ -156,43 +198,19 @@ pub(crate) fn decode_columnar(table_json: &str, marker: &str) -> Option<Vec<Valu
         return None;
     }
 
-    let schema: Vec<&str> = obj
-        .get("schema")?
-        .as_array()?
-        .iter()
-        .map(|k| k.as_str())
-        .collect::<Option<Vec<_>>>()?;
+    let schema = decode_schema(obj)?;
     let rows = obj.get("rows")?.as_array()?;
     let present = obj.get("present").and_then(Value::as_array);
 
     let mut out: Vec<Value> = Vec::with_capacity(rows.len());
     for (r, row) in rows.iter().enumerate() {
         let cells = row.as_array()?;
-        let mut rebuilt = serde_json::Map::new();
-        match present {
-            // Sparse: `present[r]` holds the schema index of each cell.
-            Some(p) => {
-                let idxs = p.get(r)?.as_array()?;
-                if idxs.len() != cells.len() {
-                    return None;
-                }
-                for (cell, idx) in cells.iter().zip(idxs) {
-                    let i = idx.as_u64()? as usize;
-                    let key = schema.get(i)?;
-                    rebuilt.insert((*key).to_string(), cell.clone());
-                }
-            }
-            // Dense: cells align 1:1 with the schema.
-            None => {
-                if cells.len() != schema.len() {
-                    return None;
-                }
-                for (key, cell) in schema.iter().zip(cells) {
-                    rebuilt.insert((*key).to_string(), cell.clone());
-                }
-            }
-        }
-        out.push(Value::Object(rebuilt));
+        // Sparse: `present[r]` holds the schema index of each cell; dense: 1:1.
+        let idxs = match present {
+            Some(p) => Some(p.get(r)?.as_array()?.as_slice()),
+            None => None,
+        };
+        out.push(Value::Object(decode_row(&schema, cells, idxs)?));
     }
 
     Some(out)

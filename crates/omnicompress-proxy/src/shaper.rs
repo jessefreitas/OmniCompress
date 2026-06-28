@@ -16,77 +16,74 @@ fn ends_with_instruction(content: &str) -> bool {
     content.trim_end().ends_with(TERSE_INSTRUCTION)
 }
 
+/// Index of the first `system`-role message, if any.
+fn find_system_idx(messages: &[Value]) -> Option<usize> {
+    messages
+        .iter()
+        .position(|msg| msg.get("role").and_then(Value::as_str) == Some("system"))
+}
+
+/// True if the last block of a content array is already the terse instruction —
+/// the idempotency check for multimodal/array content.
+fn array_already_has_instruction(arr: &[Value]) -> bool {
+    let last = match arr.last() {
+        Some(l) => l,
+        None => return false,
+    };
+    if last.get("type").and_then(Value::as_str) != Some("text") {
+        return false;
+    }
+    last.get("text")
+        .and_then(Value::as_str)
+        .is_some_and(ends_with_instruction)
+}
+
+/// Append the terse instruction to a content slot, idempotently. Shared by the OpenAI
+/// system-message `content` and the Anthropic top-level `system`:
+/// - a string gets the instruction appended (once);
+/// - an array gets a trailing `text` block (once);
+/// - any other type (or `Null`, e.g. a key that was absent) is replaced with the
+///   instruction as a plain string — matching the original per-surface behaviour.
+fn append_instruction(slot: &mut Value) {
+    match slot {
+        Value::String(s) => {
+            if !ends_with_instruction(s) {
+                s.push_str("\n\n");
+                s.push_str(TERSE_INSTRUCTION);
+            }
+        }
+        Value::Array(arr) => {
+            if !array_already_has_instruction(arr) {
+                arr.push(serde_json::json!({ "type": "text", "text": TERSE_INSTRUCTION }));
+            }
+        }
+        _ => *slot = Value::String(TERSE_INSTRUCTION.to_string()),
+    }
+}
+
 pub fn shape_openai(body: &[u8]) -> Vec<u8> {
     let mut parsed: Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(_) => return body.to_vec(),
     };
-
     let obj = match parsed.as_object_mut() {
         Some(o) => o,
         None => return body.to_vec(),
     };
-
     let messages = match obj.get_mut("messages") {
         Some(Value::Array(arr)) => arr,
         _ => return body.to_vec(),
     };
 
-    // Find existing system message
-    let mut system_idx: Option<usize> = None;
-    for (i, msg) in messages.iter().enumerate() {
-        if let Some(role) = msg.get("role").and_then(|r| r.as_str()) {
-            if role == "system" {
-                system_idx = Some(i);
-                break;
-            }
-        }
-    }
-
-    if let Some(idx) = system_idx {
-        let msg = &mut messages[idx];
-        match msg.get_mut("content") {
-            Some(Value::String(s)) => {
-                if !ends_with_instruction(s) {
-                    s.push_str("\n\n");
-                    s.push_str(TERSE_INSTRUCTION);
-                }
-            }
-            Some(Value::Array(arr)) => {
-                // Multimodal content: check last string part for idempotency.
-                let mut already_present = false;
-                if let Some(last) = arr.last() {
-                    if let Some(t) = last.get("type").and_then(|v| v.as_str()) {
-                        if t == "text" {
-                            if let Some(txt) = last.get("text").and_then(|v| v.as_str()) {
-                                if ends_with_instruction(txt) {
-                                    already_present = true;
-                                }
-                            }
-                        }
-                    }
-                }
-                if !already_present {
-                    let new_part = serde_json::json!({
-                        "type": "text",
-                        "text": TERSE_INSTRUCTION
-                    });
-                    arr.push(new_part);
-                }
-            }
-            _ => {
-                // content missing or unexpected type: set as string.
-                let new_content = TERSE_INSTRUCTION.to_string();
-                msg["content"] = Value::String(new_content);
-            }
-        }
+    if let Some(idx) = find_system_idx(messages) {
+        // Indexing a missing "content" key inserts Null, which append_instruction's
+        // catch-all turns into the instruction string — the original behaviour.
+        append_instruction(&mut messages[idx]["content"]);
     } else {
-        // Insert at the beginning of the array.
-        let system_msg = serde_json::json!({
-            "role": "system",
-            "content": TERSE_INSTRUCTION
-        });
-        messages.insert(0, system_msg);
+        messages.insert(
+            0,
+            serde_json::json!({ "role": "system", "content": TERSE_INSTRUCTION }),
+        );
     }
 
     serde_json::to_vec(&parsed).unwrap_or_else(|_| body.to_vec())
@@ -97,54 +94,18 @@ pub fn shape_anthropic(body: &[u8]) -> Vec<u8> {
         Ok(v) => v,
         Err(_) => return body.to_vec(),
     };
-
     let obj = match parsed.as_object_mut() {
         Some(o) => o,
         None => return body.to_vec(),
     };
 
-    match obj.get_mut("system") {
-        Some(Value::String(s)) => {
-            if !ends_with_instruction(s) {
-                s.push_str("\n\n");
-                s.push_str(TERSE_INSTRUCTION);
-            }
-        }
-        Some(Value::Array(arr)) => {
-            // Anthropic system can be an array of content blocks.
-            let mut already_present = false;
-            if let Some(last) = arr.last() {
-                if let Some(t) = last.get("type").and_then(|v| v.as_str()) {
-                    if t == "text" {
-                        if let Some(txt) = last.get("text").and_then(|v| v.as_str()) {
-                            if ends_with_instruction(txt) {
-                                already_present = true;
-                            }
-                        }
-                    }
-                }
-            }
-            if !already_present {
-                let new_block = serde_json::json!({
-                    "type": "text",
-                    "text": TERSE_INSTRUCTION
-                });
-                arr.push(new_block);
-            }
-        }
-        Some(_) => {
-            // Unexpected type: overwrite with string.
-            obj.insert(
-                "system".to_string(),
-                Value::String(TERSE_INSTRUCTION.to_string()),
-            );
-        }
-        None => {
-            obj.insert(
-                "system".to_string(),
-                Value::String(TERSE_INSTRUCTION.to_string()),
-            );
-        }
+    if let Some(slot) = obj.get_mut("system") {
+        append_instruction(slot);
+    } else {
+        obj.insert(
+            "system".to_string(),
+            Value::String(TERSE_INSTRUCTION.to_string()),
+        );
     }
 
     serde_json::to_vec(&parsed).unwrap_or_else(|_| body.to_vec())
@@ -253,5 +214,94 @@ mod tests {
         assert_eq!(out_openai, body.to_vec());
         let out_anthropic = shape_anthropic(body);
         assert_eq!(out_anthropic, body.to_vec());
+    }
+
+    // ── Multimodal (array) system content — previously untested; these characterise
+    //    the array branches so the DRY refactor of shape_openai/shape_anthropic is
+    //    guarded against behaviour drift. ──────────────────────────────────────────
+
+    #[test]
+    fn openai_system_array_appends_text_block() {
+        let body = serde_json::to_vec(&json!({
+            "messages": [
+                {"role": "system", "content": [{"type": "text", "text": "base"}]},
+                {"role": "user", "content": "hi"}
+            ]
+        }))
+        .unwrap();
+        let out = shape_openai(&body);
+        let v = parse(&out);
+        let blocks = v["messages"][0]["content"]
+            .as_array()
+            .expect("content stays an array");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks.last().unwrap()["type"], "text");
+        assert_eq!(blocks.last().unwrap()["text"], TERSE_INSTRUCTION);
+    }
+
+    #[test]
+    fn openai_system_array_idempotent() {
+        let body = serde_json::to_vec(&json!({
+            "messages": [
+                {"role": "system", "content": [{"type": "text", "text": "base"}]},
+                {"role": "user", "content": "hi"}
+            ]
+        }))
+        .unwrap();
+        let twice = shape_openai(&shape_openai(&body));
+        let v = parse(&twice);
+        let blocks = v["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2, "must not append a second instruction block");
+        let n = blocks
+            .iter()
+            .filter(|b| b["text"] == TERSE_INSTRUCTION)
+            .count();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn openai_system_missing_content_sets_string() {
+        let body = serde_json::to_vec(&json!({
+            "messages": [
+                {"role": "system"},
+                {"role": "user", "content": "hi"}
+            ]
+        }))
+        .unwrap();
+        let out = shape_openai(&body);
+        let v = parse(&out);
+        assert_eq!(v["messages"][0]["content"].as_str(), Some(TERSE_INSTRUCTION));
+    }
+
+    #[test]
+    fn anthropic_system_array_appends_text_block() {
+        let body = serde_json::to_vec(&json!({
+            "system": [{"type": "text", "text": "base"}],
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        let out = shape_anthropic(&body);
+        let v = parse(&out);
+        let blocks = v["system"].as_array().expect("system stays an array");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks.last().unwrap()["text"], TERSE_INSTRUCTION);
+    }
+
+    #[test]
+    fn anthropic_system_array_idempotent() {
+        let body = serde_json::to_vec(&json!({
+            "system": [{"type": "text", "text": "base"}],
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        let twice = shape_anthropic(&shape_anthropic(&body));
+        let v = parse(&twice);
+        let blocks = v["system"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        let n = blocks
+            .iter()
+            .filter(|b| b["text"] == TERSE_INSTRUCTION)
+            .count();
+        assert_eq!(n, 1);
     }
 }
